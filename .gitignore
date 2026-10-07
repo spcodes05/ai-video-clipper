@@ -1,31 +1,31 @@
 # Environment / secrets
 .env
-.env.*
-!.env.example
 
 # Python
+.venv/
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Testing
 .pytest_cache/
-.coverage
-htmlcov/
+
+# Logs
+logs/*
+!logs/.gitkeep
+
+# Generated output
+output/*
+!output/.gitkeep
+
+# Input videos
+input/*
+!input/.gitkeep
 
 # IDE
 .vscode/
 .idea/
 
 # OS
-.DS_Store
 Thumbs.db
+.DS_Store
 
 # Video files
 *.mp4
@@ -42,15 +42,7 @@ Thumbs.db
 *.aac
 *.flac
 
-# Generated output
-output/*
-!output/.gitkeep
-
-# Logs
-logs/*
-!logs/.gitkeep
-
-# Whisper/model cache
+# ML/model cache
 models/
 .cache/
 
