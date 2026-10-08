@@ -1,0 +1,65 @@
+output_dir: output
+logs_dir: logs
+
+whisper:
+  model: small            # tiny | base | small | medium | large-v3
+  device: auto
+  compute_type: auto
+
+candidates:
+  min_duration: 15
+  max_duration: 60
+  max_candidates: 40
+  scene_threshold: 27.0
+  overlap_suppression: 0.5
+  signal_weights:
+    density: 0.15
+    emotion: 0.15
+    qa: 0.10
+    punchline: 0.15
+    hook: 0.15
+    audio: 0.15
+    scene: 0.05
+    speech: 0.10
+
+boundaries:
+  lead_in: 0.25
+  tail: 0.45
+  snap_tolerance: 3.0
+
+llm:
+  provider: openai
+  model: gpt-4o-mini
+  temperature: 0.2
+  batch_size: 5
+  max_retries: 3
+  context_padding: 8.0
+
+scoring:
+  context_penalty: 0.85   # multiplier when the LLM says the clip needs too much context
+  weights:
+    hook: 0.20
+    humor: 0.20
+    surprise: 0.15
+    emotion: 0.15
+    shareability: 0.10
+    visual_interest: 0.10
+    context_completeness: 0.10
+
+selection:
+  num_clips: 5
+  allow_overlap: false
+  max_overlap_ratio: 0.0
+
+video:
+  width: 1080
+  height: 1920
+  crf: 20
+  preset: veryfast
+  audio_bitrate: 160k
+  reframe_mode: center
+
+captions:
+  style: bold
+  words_per_line: 3
+  max_chars: 20
