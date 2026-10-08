@@ -43,7 +43,7 @@ Thumbs.db
 *.flac
 
 # ML/model cache
-models/
+/models/
 .cache/
 
 # Temporary files
