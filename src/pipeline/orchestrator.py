@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 
@@ -25,6 +26,22 @@ TOTAL_STEPS = 8
 def _dump(path: Path, obj) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
+
+
+def _load_cached_transcript(path: Path, duration: float) -> Transcript | None:
+    """Return a previously saved transcript if it exists and matches this video's duration."""
+    if not path.exists():
+        return None
+    try:
+        cached = Transcript.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Ignoring unreadable cached transcript (%s): %s", path, exc)
+        return None
+    if not cached.segments or abs(cached.duration - duration) > 1.0:
+        log.warning("Cached transcript does not match this video; transcribing again.")
+        return None
+    log.info("Reusing cached transcript (%d segments)", len(cached.segments))
+    return cached
 
 
 class Pipeline:
@@ -76,10 +93,18 @@ class Pipeline:
         with tempfile.TemporaryDirectory() as tmp:
             wav = Path(tmp) / "audio.wav"
             extract_audio(self.input_path, wav)
-            transcript = WhisperService(self.cfg.whisper).transcribe(wav)
+            # Opt-in: CLIPPER_REUSE_TRANSCRIPT=1 skips Whisper if a matching transcript is saved.
+            reuse = os.getenv("CLIPPER_REUSE_TRANSCRIPT", "0").strip().lower() in ("1", "true", "yes", "on")
+            transcript = None
+            if reuse:
+                transcript = _load_cached_transcript(self.transcripts_dir / "transcript.json", meta.duration)
+            reused = transcript is not None
+            if transcript is None:
+                transcript = WhisperService(self.cfg.whisper).transcribe(wav)
             audio = AudioAnalyzer.from_wav(wav)
         transcript.duration = meta.duration
-        save_transcript(transcript, self.transcripts_dir)
+        if not reused:
+            save_transcript(transcript, self.transcripts_dir)
         if not transcript.segments:
             raise PipelineError("Transcription produced no speech segments; nothing to clip.")
         return transcript, audio

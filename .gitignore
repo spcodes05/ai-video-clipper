@@ -50,3 +50,12 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Additional local environments
+.venv312/
+
+# Generated output
+output_city/
+
+# Temporary diagnostic scripts
+test_whisper.py

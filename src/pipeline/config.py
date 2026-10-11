@@ -55,6 +55,9 @@ class BoundaryConfig(_Cfg):
 class LLMConfig(_Cfg):
     provider: str = "openai"
     model: str = "gpt-4o-mini"
+    base_url: str | None = None  # any OpenAI-compatible endpoint (Gemini, Groq, OpenRouter, Ollama)
+    api_key_env: str = "OPENAI_API_KEY"  # name of the env var / .env entry holding the key
+    requests_per_minute: float | None = None  # pace requests to stay under a free tier's limit
     temperature: float = 0.2
     batch_size: int = 5
     max_retries: int = 3

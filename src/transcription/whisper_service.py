@@ -1,4 +1,5 @@
 import logging
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -38,8 +39,13 @@ class WhisperService(TranscriptionService):
     def transcribe(self, audio_path: Path) -> Transcript:
         model = self._load()
         try:
+            # VAD (voice-activity detection) runs on onnxruntime. On some Windows setups that
+            # native library crashes the whole process, so it can be switched off with
+            # CLIPPER_VAD=0 (PowerShell: $env:CLIPPER_VAD = "0"). Default stays on.
+            vad_filter = os.getenv("CLIPPER_VAD", "1").strip().lower() not in ("0", "false", "no", "off")
+            log.info("Transcribing (vad_filter=%s)", vad_filter)
             raw_segments, info = model.transcribe(
-                str(audio_path), word_timestamps=True, vad_filter=True, beam_size=5
+                str(audio_path), word_timestamps=True, vad_filter=vad_filter, beam_size=5
             )
             segments: list[TranscriptSegment] = []
             for seg in raw_segments:  # generator: actual decoding happens here
