@@ -1,21 +1,21 @@
 import json
 import logging
-import os
 import tempfile
 from pathlib import Path
 
 from src.analysis.boundaries import refine_boundaries
-from src.analysis.llm_analyzer import LLMAnalyzer
+from src.analysis.local_analyzer import LocalAnalyzer
 from src.analysis.scoring import rank_clips, select_clips
 from src.detection.audio_analyzer import AudioAnalyzer
 from src.detection.candidate_generator import CandidateGenerator
 from src.detection.scene_detector import detect_scenes
-from src.llm import get_provider
+from src.detection.visual_analyzer import VisualAnalyzer
 from src.models.schemas import RenderedClip, Transcript, VideoMetadata
 from src.pipeline.config import AppConfig
 from src.transcription.whisper_service import WhisperService, save_transcript
 from src.utils.errors import FFmpegError, PipelineError
 from src.utils.ffmpeg import check_ffmpeg, extract_audio, probe_video, validate_video
+from src.video.qa import validate_clip
 from src.video.reframer import get_reframer
 from src.video.renderer import ClipRenderer
 
@@ -26,22 +26,6 @@ TOTAL_STEPS = 8
 def _dump(path: Path, obj) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
-
-
-def _load_cached_transcript(path: Path, duration: float) -> Transcript | None:
-    """Return a previously saved transcript if it exists and matches this video's duration."""
-    if not path.exists():
-        return None
-    try:
-        cached = Transcript.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Ignoring unreadable cached transcript (%s): %s", path, exc)
-        return None
-    if not cached.segments or abs(cached.duration - duration) > 1.0:
-        log.warning("Cached transcript does not match this video; transcribing again.")
-        return None
-    log.info("Reusing cached transcript (%d segments)", len(cached.segments))
-    return cached
 
 
 class Pipeline:
@@ -61,11 +45,12 @@ class Pipeline:
 
     # ------------------------------------------------------------------ run
     def run(self) -> list[RenderedClip]:
-        meta, provider = self._inspect()
+        meta = self._inspect()
         transcript, audio = self._transcribe(meta)
         scenes = self._detect_scenes(meta)
+        visual = VisualAnalyzer.from_video(self.input_path)
         candidates = self._generate_candidates(transcript, scenes, audio)
-        analyses = self._analyze(candidates, transcript, provider)
+        analyses = self._analyze(candidates, transcript, visual)
         selected = self._rank_and_select(candidates, analyses, transcript, meta)
         rendered = self._render(meta, transcript, selected)
         self._step(8, "Complete.")
@@ -75,36 +60,26 @@ class Pipeline:
         return rendered
 
     # ------------------------------------------------------------------ steps
-    def _inspect(self):
+    def _inspect(self) -> VideoMetadata:
         self._step(1, "Inspecting video...")
         check_ffmpeg()
         meta = probe_video(self.input_path)
         validate_video(meta, self.cfg.candidates.min_duration)
-        # Fail fast on a missing API key BEFORE the expensive transcription.
-        provider = get_provider(self.cfg.llm)
         for d in (self.clips_dir, self.transcripts_dir, self.analysis_dir):
             d.mkdir(parents=True, exist_ok=True)
         _dump(self.analysis_dir / "video_metadata.json", meta.model_dump(mode="json"))
         log.info("Video: %s", meta.model_dump())
-        return meta, provider
+        return meta
 
     def _transcribe(self, meta: VideoMetadata):
         self._step(2, "Transcribing (this can take a while on CPU)...")
         with tempfile.TemporaryDirectory() as tmp:
             wav = Path(tmp) / "audio.wav"
             extract_audio(self.input_path, wav)
-            # Opt-in: CLIPPER_REUSE_TRANSCRIPT=1 skips Whisper if a matching transcript is saved.
-            reuse = os.getenv("CLIPPER_REUSE_TRANSCRIPT", "0").strip().lower() in ("1", "true", "yes", "on")
-            transcript = None
-            if reuse:
-                transcript = _load_cached_transcript(self.transcripts_dir / "transcript.json", meta.duration)
-            reused = transcript is not None
-            if transcript is None:
-                transcript = WhisperService(self.cfg.whisper).transcribe(wav)
+            transcript: Transcript = WhisperService(self.cfg.whisper).transcribe(wav)
             audio = AudioAnalyzer.from_wav(wav)
         transcript.duration = meta.duration
-        if not reused:
-            save_transcript(transcript, self.transcripts_dir)
+        save_transcript(transcript, self.transcripts_dir)
         if not transcript.segments:
             raise PipelineError("Transcription produced no speech segments; nothing to clip.")
         return transcript, audio
@@ -126,11 +101,11 @@ class Pipeline:
         print(f"      {len(candidates)} candidates")
         return candidates
 
-    def _analyze(self, candidates, transcript, provider):
-        self._step(5, f"Analyzing {len(candidates)} candidates with LLM...")
-        analyses = LLMAnalyzer(provider, self.cfg.llm).analyze(candidates, transcript)
+    def _analyze(self, candidates, transcript, visual):
+        self._step(5, f"Scoring {len(candidates)} candidates locally (profile: {self.cfg.analysis.profile})...")
+        analyses = LocalAnalyzer(self.cfg, visual).analyze(candidates, transcript)
         if not analyses:
-            raise PipelineError("The LLM returned no valid analyses. Check logs/app.log for details.")
+            raise PipelineError("Local analysis produced no results. Check logs/app.log for details.")
         return analyses
 
     def _rank_and_select(self, candidates, analyses, transcript, meta):
@@ -164,15 +139,47 @@ class Pipeline:
             self.analysis_dir / "captions",
         )
         rendered: list[RenderedClip] = []
+        report: list[dict] = []
         for clip in selected:
             out_path = self.clips_dir / f"clip_{clip.clip_number:02d}.mp4"
             print(f"      rendering {out_path.name} ({clip.final_end - clip.final_start:.1f}s)...", flush=True)
+            entry = {
+                "clip": out_path.name,
+                "candidate_id": clip.candidate.id,
+                "start": clip.final_start,
+                "end": clip.final_end,
+                "viral_score": clip.viral_score,
+                "title": clip.analysis.title,
+                "reasoning": clip.analysis.reasoning,
+                "ok": False,
+                "issues": [],
+            }
+            item = None
             try:
-                rendered.append(renderer.render(self.input_path, meta, clip, transcript, out_path))
+                item = renderer.render(self.input_path, meta, clip, transcript, out_path)
+                entry["issues"] = validate_clip(
+                    out_path, item.duration, self.cfg.video.width, self.cfg.video.height
+                )
             except FFmpegError as exc:
-                log.error("Rendering %s failed: %s", out_path.name, exc)
-                print(f"      ! {out_path.name} failed: {exc}")
+                entry["issues"] = [f"render failed: {exc}"]
+            entry["ok"] = not entry["issues"]
+            report.append(entry)
+            if entry["ok"] and item is not None:
+                rendered.append(item)
+            else:
+                log.error("%s failed: %s", out_path.name, "; ".join(entry["issues"]))
+                print(f"      ! {out_path.name} failed: {'; '.join(entry['issues'])}")
+        _dump(
+            self.analysis_dir / "report.json",
+            {
+                "input": str(self.input_path),
+                "profile": self.cfg.analysis.profile,
+                "requested_clips": self.cfg.selection.num_clips,
+                "rendered_clips": len(rendered),
+                "clips": report,
+            },
+        )
         if not rendered:
-            raise PipelineError("All clip renders failed. See logs/app.log.")
+            raise PipelineError("All clip renders failed validation. See analysis/report.json and logs/app.log.")
         _dump(self.analysis_dir / "rendered.json", [r.model_dump(mode="json") for r in rendered])
         return rendered

@@ -28,10 +28,16 @@ class WhisperService(TranscriptionService):
             try:
                 from faster_whisper import WhisperModel
 
-                log.info("Loading Whisper model '%s' (device=%s)", self.cfg.model, self.cfg.device)
-                self._model = WhisperModel(
-                    self.cfg.model, device=self.cfg.device, compute_type=self.cfg.compute_type
-                )
+                source = self.cfg.model_path or self.cfg.model
+                log.info("Loading Whisper model '%s' (device=%s)", source, self.cfg.device)
+                kwargs = dict(device=self.cfg.device, compute_type=self.cfg.compute_type)
+                if self.cfg.model_path:
+                    self._model = WhisperModel(self.cfg.model_path, local_files_only=True, **kwargs)
+                else:
+                    try:
+                        self._model = WhisperModel(self.cfg.model, local_files_only=True, **kwargs)
+                    except Exception:  # noqa: BLE001
+                        self._model = WhisperModel(self.cfg.model, **kwargs)
             except Exception as exc:  # noqa: BLE001
                 raise TranscriptionError(f"Could not load Whisper model '{self.cfg.model}': {exc}") from exc
         return self._model

@@ -14,6 +14,7 @@ class _Cfg(BaseModel):
 
 class WhisperConfig(_Cfg):
     model: Literal["tiny", "base", "small", "medium", "large-v3"] = "small"
+    model_path: str | None = None  # local folder with the CTranslate2 model; skips all downloads
     device: str = "auto"
     compute_type: str = "auto"
 
@@ -113,17 +114,81 @@ class CaptionConfig(_Cfg):
     max_chars: int = 20
 
 
+
+
+class ProfileConfig(_Cfg):
+    weights: ScoringWeights | None = None  # None = use scoring.weights from config.yaml
+    ideal_duration: float = 30.0
+
+
+class AnalysisConfig(_Cfg):
+    profile: str = "general"
+
+
+DEFAULT_PROFILES: dict[str, ProfileConfig] = {
+    "general": ProfileConfig(),
+    "comedy": ProfileConfig(
+        weights=ScoringWeights(
+            hook=0.15, humor=0.30, surprise=0.20, emotion=0.10,
+            shareability=0.10, visual_interest=0.05, context_completeness=0.10,
+        ),
+        ideal_duration=25.0,
+    ),
+    "interview": ProfileConfig(
+        weights=ScoringWeights(
+            hook=0.20, humor=0.05, surprise=0.15, emotion=0.20,
+            shareability=0.10, visual_interest=0.05, context_completeness=0.25,
+        ),
+        ideal_duration=40.0,
+    ),
+    "educational": ProfileConfig(
+        weights=ScoringWeights(
+            hook=0.20, humor=0.00, surprise=0.10, emotion=0.05,
+            shareability=0.15, visual_interest=0.10, context_completeness=0.40,
+        ),
+        ideal_duration=45.0,
+    ),
+    "gaming": ProfileConfig(
+        weights=ScoringWeights(
+            hook=0.15, humor=0.15, surprise=0.25, emotion=0.15,
+            shareability=0.10, visual_interest=0.15, context_completeness=0.05,
+        ),
+        ideal_duration=25.0,
+    ),
+    "tutorial": ProfileConfig(
+        weights=ScoringWeights(
+            hook=0.15, humor=0.00, surprise=0.05, emotion=0.00,
+            shareability=0.15, visual_interest=0.20, context_completeness=0.45,
+        ),
+        ideal_duration=45.0,
+    ),
+}
+
+
 class AppConfig(_Cfg):
     output_dir: str = "output"
     logs_dir: str = "logs"
     whisper: WhisperConfig = Field(default_factory=WhisperConfig)
     candidates: CandidateConfig = Field(default_factory=CandidateConfig)
     boundaries: BoundaryConfig = Field(default_factory=BoundaryConfig)
-    llm: LLMConfig = Field(default_factory=LLMConfig)
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+    profiles: dict[str, ProfileConfig] = Field(default_factory=lambda: dict(DEFAULT_PROFILES))
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     selection: SelectionConfig = Field(default_factory=SelectionConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)
     captions: CaptionConfig = Field(default_factory=CaptionConfig)
+
+
+
+
+def apply_profile(cfg: AppConfig) -> AppConfig:
+    name = cfg.analysis.profile
+    profile = cfg.profiles.get(name)
+    if profile is None:
+        raise ConfigError(f"Unknown profile '{name}'. Available: {', '.join(sorted(cfg.profiles))}")
+    if profile.weights is not None:
+        cfg.scoring.weights = profile.weights
+    return cfg
 
 
 def _set(data: dict, keys: tuple[str, ...], value) -> None:
@@ -157,8 +222,10 @@ def load_config(path: str = "config.yaml", overrides: dict | None = None) -> App
     _set(data, ("candidates", "max_duration"), o.get("max_duration"))
     _set(data, ("whisper", "model"), o.get("whisper_model"))
     _set(data, ("captions", "style"), o.get("caption_style"))
+    _set(data, ("analysis", "profile"), o.get("profile"))
 
     try:
-        return AppConfig.model_validate(data)
+        cfg = AppConfig.model_validate(data)
     except ValidationError as exc:
         raise ConfigError(f"Invalid configuration:\n{exc}") from exc
+    return apply_profile(cfg)

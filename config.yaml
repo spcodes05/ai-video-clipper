@@ -2,9 +2,7 @@ output_dir: output
 logs_dir: logs
 
 whisper:
-  model: small            # tiny | base | small | medium | large-v3
-  device: cpu            # forced: 'auto' picked a CUDA GPU without cuDNN and crashed
-  compute_type: int8
+  model_path: models/faster-whisper-tiny
 
 candidates:
   min_duration: 15
@@ -27,27 +25,8 @@ boundaries:
   tail: 0.45
   snap_tolerance: 3.0
 
-llm:
-  provider: openai   # 'openai' = any OpenAI-compatible API; exactly ONE block below is active
-  # --- ACTIVE (free): Google Gemini. Key: aistudio.google.com -> GEMINI_API_KEY in .env ---
-  base_url: https://generativelanguage.googleapis.com/v1beta/openai/
-  api_key_env: GEMINI_API_KEY
-  model: gemini-3.8-flash
-  requests_per_minute: 4   # free tier allows 5/min; we stay just under it (8 requests ~ 2 min)
-  # --- FREE alternative: Groq. Key: console.groq.com/keys -> GROQ_API_KEY in .env ---
-  # base_url: https://api.groq.com/openai/v1
-  # api_key_env: GROQ_API_KEY
-  # model: llama-3.3-70b-versatile
-  # requests_per_minute: 25
-  # --- FREE, local: Ollama (no key; run `ollama pull llama3.1:8b` first) ---
-  # base_url: http://localhost:11434/v1
-  # model: llama3.1:8b
-  # --- PAID: OpenAI (delete base_url, use api_key_env: OPENAI_API_KEY) ---
-  # model: gpt-4o-mini
-  temperature: 0.2
-  batch_size: 5
-  max_retries: 3
-  context_padding: 8.0
+analysis:
+  profile: general        # general | comedy | interview | educational | gaming | tutorial
 
 scoring:
   context_penalty: 0.85   # multiplier when the LLM says the clip needs too much context

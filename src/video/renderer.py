@@ -63,6 +63,8 @@ class ClipRenderer:
             "-c:v", "libx264",
             "-preset", self.v.preset,
             "-crf", str(self.v.crf),
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar", "48000",
             "-c:a", "aac",
             "-b:a", self.v.audio_bitrate,
             "-movflags", "+faststart",
