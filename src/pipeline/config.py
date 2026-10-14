@@ -223,6 +223,7 @@ def load_config(path: str = "config.yaml", overrides: dict | None = None) -> App
     _set(data, ("whisper", "model"), o.get("whisper_model"))
     _set(data, ("captions", "style"), o.get("caption_style"))
     _set(data, ("analysis", "profile"), o.get("profile"))
+    data.pop("phase2", None)  # phase2 config is handled separately in renderer.py
 
     try:
         cfg = AppConfig.model_validate(data)

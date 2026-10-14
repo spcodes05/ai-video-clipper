@@ -56,3 +56,78 @@ captions:
   style: bold
   words_per_line: 3
   max_chars: 20
+
+phase2:
+  clip:
+    min_seconds: 45
+    target_seconds: 60
+    max_seconds: 90
+    start_lookback: 6.0
+    end_lookahead: 8.0
+    lead_in: 0.15
+    tail_out: 0.35
+    max_overlap: 0.4
+    sentence_gap: 0.8
+  render:
+    width: 1080
+    height: 1920
+    fps: 30
+    crf: 20
+    preset: medium
+    audio_bitrate: 192k
+    loudnorm: false
+    target_lufs: -16.0
+    limiter: true
+    max_upscale: 2.0
+  framing:
+    enabled: true
+    sample_interval: 0.5
+    analysis_width: 640
+    min_confidence: 2.0
+    min_neighbors: 5
+    deadzone: 0.06
+    smoothing: 0.15
+    max_speed: 0.25
+    keyframe_interval: 1.0
+    headroom: 0.35
+    track_ttl: 1.5
+    match_distance: 0.12
+    switch_ratio: 1.4
+    hold_seconds: 2.0
+  captions:
+    enabled: true
+    font: Arial
+    font_file: null
+    font_size: 78
+    primary: "FFFFFF"
+    highlight: "00E5FF"
+    outline_color: "000000"
+    outline: 5
+    shadow: 2
+    max_words: 4
+    max_chars: 22
+    max_lines: 2
+    margin_bottom: 420
+    min_margin_bottom: 220
+    margin_side: 90
+    word_highlight: true
+    min_word_seconds: 0.08
+    max_gap: 0.8
+  edit:
+    remove_silence: false
+    max_pause: 1.2
+    keep_pause: 0.4
+  analysis:
+    scene_detection: true
+    scene_threshold: 0.35
+    scene_fps: 2.0
+    laughter: false
+    delivery: false
+  weights:
+    opening: 0.20
+    completeness: 0.20
+    information: 0.20
+    audio_quality: 0.10
+    delivery: 0.10
+    laughter: 0.05
+    visual: 0.15
