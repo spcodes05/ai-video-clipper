@@ -100,18 +100,72 @@ def thin_keyframes(path: Sequence[Tuple[float, float, bool]], interval: float
     return kf or [(0.0, 0.0)]
 
 
+MAX_KEYFRAMES = 150  # keeps the filter well under Windows' 32,767-char command-line limit
+
+
+def reduce_keyframes(kf: Sequence[Tuple[float, float]], tolerance: float,
+                     max_points: int = MAX_KEYFRAMES) -> List[Tuple[float, float]]:
+    """Ramer-Douglas-Peucker on x(t) using vertical (x) error, so the piecewise-linear
+    path stays within `tolerance` px of the original. Hard cut-steps (two keyframes ~1 ms
+    apart) deviate strongly and are therefore preserved. If more than `max_points`
+    remain, the tolerance is doubled until it fits."""
+    pts = list(kf)
+    if len(pts) <= 2:
+        return pts
+
+    def rdp(tol: float) -> List[Tuple[float, float]]:
+        keep = [False] * len(pts)
+        keep[0] = keep[-1] = True
+        stack = [(0, len(pts) - 1)]
+        while stack:
+            a, b = stack.pop()
+            (t0, x0), (t1, x1) = pts[a], pts[b]
+            worst, idx = -1.0, -1
+            for i in range(a + 1, b):
+                t, x = pts[i]
+                expect = x0 + (x1 - x0) * ((t - t0) / (t1 - t0) if t1 > t0 else 0.0)
+                err = abs(x - expect)
+                if err > worst:
+                    worst, idx = err, i
+            if worst > tol:
+                keep[idx] = True
+                stack += [(a, idx), (idx, b)]
+        return [p for p, k in zip(pts, keep) if k]
+
+    tol = max(tolerance, 0.0)
+    out = rdp(tol)
+    while len(out) > max_points:
+        tol = max(tol * 2, 0.5)
+        out = rdp(tol)
+    return out
+
+
+def _segment(t0: float, x0: float, t1: float, x1: float) -> str:
+    if abs(x1 - x0) < 0.01 or t1 <= t0:
+        return f"{x0:.2f}"
+    return f"{x0:.2f}+({x1 - x0:.2f})*(t-{t0:.3f})/{t1 - t0:.3f}"
+
+
 def x_expression(kf: Sequence[Tuple[float, float]]) -> str:
-    """Piecewise-linear x(t) for FFmpeg's crop filter (no spaces; wrap in quotes)."""
+    """Piecewise-linear x(t) for FFmpeg's crop filter.
+
+    A balanced binary tree of if(lt(t,T),left,right) keeps nesting depth at ~log2(N).
+    (A linear if-chain nests N deep and FFmpeg's expression parser rejects more than
+    ~100 nested levels with "Missing ')' or too many args".) The result is clamped to
+    the frame with clip(...,0,iw-ow). No spaces; the caller wraps it in single quotes."""
     if len(kf) == 1 or all(abs(x - kf[0][1]) < 0.01 for _, x in kf):
         return f"{kf[0][1]:.2f}"
-    expr = f"{kf[-1][1]:.2f}"
-    for (t0, x0), (t1, x1) in reversed(list(zip(kf, kf[1:]))):
-        if abs(x1 - x0) < 0.01:
-            seg = f"{x0:.2f}"
-        else:
-            seg = f"{x0:.2f}+({x1 - x0:.2f})*(t-{t0:.3f})/{t1 - t0:.3f}"
-        expr = f"if(lt(t,{t1:.3f}),{seg},{expr})"
-    return expr
+    # leaf i covers [kf[i].t, kf[i+1].t); the last leaf holds the final value.
+    leaves = [_segment(kf[i][0], kf[i][1], kf[i + 1][0], kf[i + 1][1])
+              for i in range(len(kf) - 1)] + [f"{kf[-1][1]:.2f}"]
+
+    def build(lo: int, hi: int) -> str:
+        if lo == hi:
+            return leaves[lo]
+        mid = (lo + hi + 1) // 2
+        return f"if(lt(t,{kf[mid][0]:.3f}),{build(lo, mid - 1)},{build(mid, hi)})"
+
+    return f"clip({build(0, len(leaves) - 1)},0,iw-ow)"
 
 
 def static_y(cys: Sequence[float], ch: int, src_h: int, headroom: float) -> int:

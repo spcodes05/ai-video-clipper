@@ -112,3 +112,17 @@ The score is a ranking heuristic. It does not predict or guarantee virality.
 python -m pytest
 ```
 `tests/test_pipeline_smoke.py` renders a real 9:16 clip from a generated video using a fake LLM (needs FFmpeg, no API key, no Whisper).
+
+## Phase 2 (optional)
+
+Set `phase2.enabled: true` in `config.yaml`, or pass `--phase2` / `--no-phase2` (overrides the file).
+When enabled, `ClipRenderer` hands each clip to `phase2.pipeline.render_clip`: face detection and
+tracking with a smoothed dynamic 9:16 crop (falls back to a centered crop, with a warning, if OpenCV
+4.x Haar detection is unavailable), phase2 captions (`phase2.captions`), audio filters
+(`phase2.render.loudnorm`/`limiter`) and optional silence removal (`phase2.edit`).
+Output size and encoder settings still come from `video:`. `--caption-style` and `captions:` apply to the
+legacy renderer only. Clip boundaries are set once, by `src/analysis/boundaries.py`, before selection;
+clip length limits are `candidates.min_duration`/`max_duration` (`--min-duration`/`--max-duration`).
+OpenCV 5.x has no Haar cascade, so `requirements.txt` pins `opencv-python<5`.
+A Phase 2 render error fails that clip (see `output/analysis/report.json` and `logs/app.log`);
+there is no silent fallback to the legacy renderer.

@@ -12,6 +12,7 @@ from src.detection.scene_detector import detect_scenes
 from src.detection.visual_analyzer import VisualAnalyzer
 from src.models.schemas import RenderedClip, Transcript, VideoMetadata
 from src.pipeline.config import AppConfig
+from src.pipeline.phase2_bridge import build_phase2_cfg, scene_cuts_from, selection_for
 from src.transcription.whisper_service import WhisperService, save_transcript
 from src.utils.errors import FFmpegError, PipelineError
 from src.utils.ffmpeg import check_ffmpeg, extract_audio, probe_video, validate_video
@@ -36,6 +37,7 @@ class Pipeline:
         self.clips_dir = self.out / "clips"
         self.transcripts_dir = self.out / "transcripts"
         self.analysis_dir = self.out / "analysis"
+        self.phase2_cfg = build_phase2_cfg(cfg)  # None unless phase2.enabled; raises ConfigError if broken
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -52,7 +54,7 @@ class Pipeline:
         candidates = self._generate_candidates(transcript, scenes, audio)
         analyses = self._analyze(candidates, transcript, visual)
         selected = self._rank_and_select(candidates, analyses, transcript, meta)
-        rendered = self._render(meta, transcript, selected)
+        rendered = self._render(meta, transcript, selected, scenes)
         self._step(8, "Complete.")
         for r in rendered:
             print(f"      clip_{r.clip_number:02d}  score={r.viral_score:5.1f}  {r.duration:4.1f}s  {r.title}")
@@ -120,7 +122,7 @@ class Pipeline:
                 self.cfg.boundaries,
                 self.cfg.candidates.max_duration,
             )
-        selected = select_clips(ranked, self.cfg.selection)
+        selected = select_clips(ranked, selection_for(self.cfg.selection, self.phase2_cfg))
         if len(selected) < self.cfg.selection.num_clips:
             log.warning("Only %d/%d clips could be selected.", len(selected), self.cfg.selection.num_clips)
         _dump(self.analysis_dir / "rankings.json", [r.model_dump(mode="json") for r in ranked])
@@ -128,8 +130,9 @@ class Pipeline:
             raise PipelineError("No clips could be selected.")
         return selected
 
-    def _render(self, meta, transcript, selected):
-        self._step(7, "Rendering...")
+    def _render(self, meta, transcript, selected, scenes=()):
+        self._step(7, "Rendering (Phase 2 enabled)..." if self.phase2_cfg else "Rendering...")
+        scene_cuts = scene_cuts_from(scenes)
         for old in self.clips_dir.glob("clip_*.mp4"):
             old.unlink()
         renderer = ClipRenderer(
@@ -137,6 +140,7 @@ class Pipeline:
             self.cfg.captions,
             get_reframer(self.cfg.video.reframe_mode),
             self.analysis_dir / "captions",
+            phase2_cfg=self.phase2_cfg,
         )
         rendered: list[RenderedClip] = []
         report: list[dict] = []
@@ -156,7 +160,9 @@ class Pipeline:
             }
             item = None
             try:
-                item = renderer.render(self.input_path, meta, clip, transcript, out_path)
+                item = renderer.render(
+                    self.input_path, meta, clip, transcript, out_path, scene_cuts=scene_cuts
+                )
                 entry["issues"] = validate_clip(
                     out_path, item.duration, self.cfg.video.width, self.cfg.video.height
                 )
@@ -174,6 +180,7 @@ class Pipeline:
             {
                 "input": str(self.input_path),
                 "profile": self.cfg.analysis.profile,
+                "phase2_enabled": self.phase2_cfg is not None,
                 "requested_clips": self.cfg.selection.num_clips,
                 "rendered_clips": len(rendered),
                 "clips": report,

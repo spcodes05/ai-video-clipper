@@ -210,6 +210,7 @@ def _build(cls, data: Any, path: str):
 
 @dataclass
 class Phase2Cfg:
+    enabled: bool = False
     clip: ClipCfg = field(default_factory=ClipCfg)
     render: RenderCfg = field(default_factory=RenderCfg)
     framing: FramingCfg = field(default_factory=FramingCfg)
@@ -224,10 +225,13 @@ class Phase2Cfg:
         sec = (raw or {}).get("phase2") or {}
         if not isinstance(sec, dict):
             raise ConfigError("'phase2' must be a mapping")
-        allowed = {"clip", "render", "framing", "captions", "edit", "analysis", "weights"}
+        allowed = {"enabled", "clip", "render", "framing", "captions", "edit", "analysis", "weights"}
         unknown = sorted(set(sec) - allowed)
         if unknown:
             raise ConfigError(f"Unknown key(s) in 'phase2': {unknown}")
+        enabled = sec.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ConfigError("'phase2.enabled' must be true or false")
         weights = dict(DEFAULT_WEIGHTS)
         w = sec.get("weights") or {}
         if not isinstance(w, dict):
@@ -241,6 +245,7 @@ class Phase2Cfg:
         if sum(weights.values()) <= 0:
             raise ConfigError("phase2.weights must not all be zero")
         return cls(
+            enabled=enabled,
             clip=_build(ClipCfg, sec.get("clip"), "phase2.clip"),
             render=_build(RenderCfg, sec.get("render"), "phase2.render"),
             framing=_build(FramingCfg, sec.get("framing"), "phase2.framing"),

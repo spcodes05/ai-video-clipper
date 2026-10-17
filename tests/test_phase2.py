@@ -9,7 +9,7 @@ from phase2.boundaries import (Candidate, Word, compute_keep_segments, dedupe,
 from phase2.captions import build_ass, group_words, line_breaks
 from phase2.config import CaptionCfg, ClipCfg, ConfigError, FramingCfg, Phase2Cfg
 from phase2.crop import (CropPlan, crop_size, effective_size, output_size,
-                         smooth_path, thin_keyframes, x_expression)
+                         reduce_keyframes, smooth_path, thin_keyframes, x_expression)
 from phase2.faces import DetectorUnavailable, FaceBox, HaarFaceDetector
 from phase2.ffmpeg_utils import (FFmpegError, build_render_command, build_video_filter,
                                  video_info)
@@ -118,7 +118,7 @@ def test_tracking_fallback_holds_last_position():
 def test_x_expression_formats():
     assert x_expression([(0.0, 100.0)]) == "100.00"
     e = x_expression([(0.0, 0.0), (1.0, 50.0), (2.0, 50.0)])
-    assert e.startswith("if(lt(t,") and " " not in e
+    assert e.startswith("clip(") and "if(lt(t," in e and " " not in e
     kf = thin_keyframes([(0, 0, False), (0.5, 1, False), (1.0, 900, True)], 1.0)
     assert kf[-1] == (1.0, 900)
 
@@ -216,3 +216,109 @@ def test_end_to_end_synthetic(tmp_path):
     info = video_info(res.output)
     assert (info.width, info.height) == (540, 960) and info.has_audio
     assert abs(info.duration - 4.0) < 0.75
+
+# ---- regression: long tracking sequences / crop expression (FFmpeg nesting limit)
+def _eval_expr(expr, t, iw=1280, ow=404):
+    """Evaluate an FFmpeg crop expression in Python (only if/lt/clip/arithmetic are used)."""
+    import re
+    py = expr.replace("iw-ow", str(iw - ow))
+    py = re.sub(r"\bif\(", "_if(", py)
+    py = re.sub(r"\blt\(", "_lt(", py)
+    py = re.sub(r"\bclip\(", "_clip(", py)
+    env = {"_if": lambda c, a, b: a if c else b, "_lt": lambda a, b: a < b,
+           "_clip": lambda v, lo, hi: min(max(v, lo), hi), "t": t}
+    return eval(py, {"__builtins__": {}}, env)
+
+
+def _max_paren_depth(s):
+    depth = best = 0
+    for ch in s:
+        depth += ch == "("
+        best = max(best, depth)
+        depth -= ch == ")"
+    return best
+
+
+def _wiggly_keyframes(n, step=0.1):
+    import math
+    return [(i * step, 400 + 300 * math.sin(i / 7.0) + (60 if i % 11 == 0 else 0)) for i in range(n)]
+
+
+def test_x_expression_depth_is_logarithmic_for_long_sequences():
+    kf = _wiggly_keyframes(2000)
+    e = x_expression(kf)
+    assert _max_paren_depth(e) < 40          # linear if-chain would be ~2000 deep
+    assert " " not in e and "\n" not in e
+
+
+def test_x_expression_matches_linear_interpolation_and_stays_in_frame():
+    kf = _wiggly_keyframes(300)
+    e = x_expression(kf)
+    for t in [0.0, 0.05, 1.234, 7.7, 15.0, 29.85, 29.9, 45.0]:
+        i = max(j for j in range(len(kf)) if kf[j][0] <= t)
+        if i == len(kf) - 1:
+            want = kf[-1][1]
+        else:
+            (t0, x0), (t1, x1) = kf[i], kf[i + 1]
+            want = x0 + (x1 - x0) * (t - t0) / (t1 - t0)
+        assert _eval_expr(e, t) == pytest.approx(min(max(want, 0), 1280 - 404), abs=0.02)
+    # out-of-range keyframes are clamped to the frame
+    wild = x_expression([(0.0, -50.0), (1.0, 5000.0), (2.0, 5000.0)])
+    for t in (0.0, 0.5, 1.0, 1.5, 3.0):
+        assert 0 <= _eval_expr(wild, t) <= 1280 - 404
+
+
+def test_reduce_keyframes_bounds_count_error_and_keeps_cut_steps():
+    import math
+    kf = [(i * 0.05, 300 + 200 * math.sin(i / 40.0)) for i in range(2000)]
+    out = reduce_keyframes(kf, tolerance=3.0, max_points=150)
+    assert 2 <= len(out) <= 150 and out[0] == kf[0] and out[-1] == kf[-1]
+    tol_used_ok = max(abs(_lin(out, t) - x) for t, x in kf)
+    assert tol_used_ok <= 48.0                 # tolerance doubles only until the cap is met
+    step = [(0.0, 100.0), (4.999, 100.0), (5.0, 900.0), (9.0, 900.0)]
+    kept = reduce_keyframes(step, 1.0)
+    assert (4.999, 100.0) in kept and (5.0, 900.0) in kept
+
+
+def _lin(path, t):
+    for (t0, x0), (t1, x1) in zip(path, path[1:]):
+        if t0 <= t <= t1:
+            return x0 + (x1 - x0) * ((t - t0) / (t1 - t0) if t1 > t0 else 0)
+    return path[-1][1]
+
+
+def test_long_tracking_sequence_end_to_end_keyframe_budget():
+    cfg = FramingCfg(sample_interval=0.25, keyframe_interval=0.25)
+    boxes = lambda i: [FaceBox(0, 200 + (i * 97) % 700, 200, 150, 150, 9.0, 0.0)]
+    samples = [(i * 0.25, boxes(i)) for i in range(400)]           # 100 s
+    subj = track_subject(samples, 1280, cfg)
+    path = smooth_path([(s.t, s.cx) for s in subj], 1280, 404, cfg, cuts=[20.0, 50.0])
+    kf = reduce_keyframes(thin_keyframes(path, cfg.keyframe_interval), 0.01 * 404)
+    assert len(kf) <= 150
+    assert all(0 <= x <= 1280 - 404 + 1e-6 for _, x in kf)
+    assert all(b[0] > a[0] for a, b in zip(kf, kf[1:]))
+
+
+def _ffmpeg_accepts(vf):
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                        "testsrc2=size=1280x720:rate=10:duration=0.3", "-vf", vf, "-f", "null", "-"],
+                       capture_output=True, text=True)
+    return r.returncode == 0, r.stderr
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+@pytest.mark.parametrize("n", [20, 99, 100, 150, 400])
+def test_ffmpeg_parses_long_crop_expression(n):
+    plan = CropPlan(404, 720, x_expression(_wiggly_keyframes(n, 0.2)), 0)
+    vf = build_video_filter(plan, 540, 960, 30, None, None)
+    ok, err = _ffmpeg_accepts(vf)
+    assert ok, err[-400:]
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+def test_ffmpeg_parses_expression_with_hard_cut_steps_and_keep_segments():
+    kf = [(0.0, 100.0), (1.999, 100.0), (2.0, 800.0), (3.0, 800.0)]
+    plan = CropPlan(404, 720, x_expression(kf), 0)
+    vf = build_video_filter(plan, 540, 960, 30, [(0.0, 0.1), (0.2, 0.3)], "captions.ass")
+    ok, err = _ffmpeg_accepts(vf.replace(",subtitles=filename=captions.ass", ""))
+    assert ok, err[-400:]

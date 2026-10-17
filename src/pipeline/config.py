@@ -177,8 +177,7 @@ class AppConfig(_Cfg):
     selection: SelectionConfig = Field(default_factory=SelectionConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)
     captions: CaptionConfig = Field(default_factory=CaptionConfig)
-
-
+    phase2: dict | None = None  # raw section; validated by src.pipeline.phase2_bridge
 
 
 def apply_profile(cfg: AppConfig) -> AppConfig:
@@ -223,7 +222,11 @@ def load_config(path: str = "config.yaml", overrides: dict | None = None) -> App
     _set(data, ("whisper", "model"), o.get("whisper_model"))
     _set(data, ("captions", "style"), o.get("caption_style"))
     _set(data, ("analysis", "profile"), o.get("profile"))
-    data.pop("phase2", None)  # phase2 config is handled separately in renderer.py
+    if data.get("phase2") is None:
+        data.pop("phase2", None)
+    elif not isinstance(data["phase2"], dict):
+        raise ConfigError("'phase2' must be a mapping")
+    _set(data, ("phase2", "enabled"), o.get("phase2"))
 
     try:
         cfg = AppConfig.model_validate(data)

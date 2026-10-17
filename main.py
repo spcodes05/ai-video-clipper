@@ -25,6 +25,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--whisper-model", choices=["tiny", "base", "small", "medium", "large-v3"])
     p.add_argument("--caption-style", choices=sorted(STYLES.keys()))
     p.add_argument("--profile", choices=sorted(DEFAULT_PROFILES.keys()), help="Content profile (default: general)")
+    p.add_argument("--phase2", action=argparse.BooleanOptionalAction, default=None,
+                   help="Enable/disable Phase 2 rendering (overrides phase2.enabled in config.yaml)")
     p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     p.add_argument("--debug", action="store_true", help="Verbose logging")
     return p.parse_args(argv)
@@ -41,6 +43,7 @@ def main(argv=None) -> int:
         "whisper_model": args.whisper_model,
         "caption_style": args.caption_style,
         "profile": args.profile,
+        "phase2": args.phase2,
     }
     try:
         cfg = load_config(args.config, overrides)

@@ -12,8 +12,8 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 from .boundaries import Word, compute_keep_segments, retime_words
 from .captions import build_ass, caption_margin_for_faces
 from .config import Phase2Cfg
-from .crop import (CropPlan, crop_size, effective_size, output_size, smooth_path,
-                   static_y, thin_keyframes, x_expression)
+from .crop import (CropPlan, crop_size, effective_size, output_size, reduce_keyframes,
+                   smooth_path, static_y, thin_keyframes, x_expression)
 from .faces import DetectorUnavailable, HaarFaceDetector, sample_faces
 from .ffmpeg_utils import (FFmpegError, build_audio_filter, build_render_command,
                            build_video_filter, run, validate_output, video_info)
@@ -72,7 +72,7 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word],
             log.warning("Face tracking unavailable (%s); using centered crop", e)
 
     path = smooth_path(raw, sw, cw, cfg.framing, cuts)
-    kf = thin_keyframes(path, cfg.framing.keyframe_interval)
+    kf = reduce_keyframes(thin_keyframes(path, cfg.framing.keyframe_interval), 0.01 * cw)
     plan = CropPlan(cw, ch, x_expression(kf), static_y(cys, ch, sh, cfg.framing.headroom))
 
     keep = None
@@ -119,7 +119,10 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word],
                 captions_ok = n == 0
                 break
             except FFmpegError as e:
-                if n == len(attempts) - 1:
+                # Only a caption problem justifies the plain-caption retry; anything else
+                # (e.g. a crop/filter error) would fail again, so surface it immediately.
+                caption_related = any(k in str(e).lower() for k in ("subtitles", ".ass", "font", "libass"))
+                if n == len(attempts) - 1 or not caption_related:
                     raise
                 log.warning("Render with styled captions failed (%s); retrying with plain captions", e)
 

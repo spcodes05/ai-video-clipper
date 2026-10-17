@@ -34,6 +34,10 @@ class HaarFaceDetector:
         self.np = np
         self.min_confidence = min_confidence
         self.min_neighbors = min_neighbors
+        if not hasattr(cv2, "CascadeClassifier"):
+            raise DetectorUnavailable(
+                f"OpenCV {getattr(cv2, '__version__', '?')} has no CascadeClassifier "
+                "(OpenCV 5.x removed it); install: pip install \"opencv-python>=4.9,<5\"")
         self._cc = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
         if self._cc.empty():

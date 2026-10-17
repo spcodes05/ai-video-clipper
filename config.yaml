@@ -58,6 +58,7 @@ captions:
   max_chars: 20
 
 phase2:
+  enabled: false   # master switch; --phase2 / --no-phase2 overrides
   clip:
     min_seconds: 45
     target_seconds: 60
@@ -75,7 +76,7 @@ phase2:
     crf: 20
     preset: medium
     audio_bitrate: 192k
-    loudnorm: false
+    loudnorm: true
     target_lufs: -16.0
     limiter: true
     max_upscale: 2.0
