@@ -3,6 +3,7 @@ import re
 from collections import Counter
 
 from src.detection.candidate_generator import FRAGMENT_STARTERS, LAUGH_TOKENS, WORD_RE
+from src.detection.laughter import peak_in
 from src.detection.visual_analyzer import VisualAnalyzer
 from src.models.schemas import CandidateClip, ClipAnalysis, Transcript, TranscriptSegment
 from src.pipeline.config import AppConfig
@@ -59,9 +60,10 @@ class LocalAnalyzer:
     Produces the same ClipAnalysis objects, from weak local signals only.
     """
 
-    def __init__(self, cfg: AppConfig, visual: VisualAnalyzer | None = None):
+    def __init__(self, cfg: AppConfig, visual: VisualAnalyzer | None = None, laughter=None):
         self.cfg = cfg
         self.visual = visual
+        self.laughter = laughter or []
         self.ideal = cfg.profiles[cfg.analysis.profile].ideal_duration
 
     def analyze(self, candidates: list[CandidateClip], transcript: Transcript) -> list[ClipAnalysis]:
@@ -104,7 +106,9 @@ class LocalAnalyzer:
             repetition = min(2.0 * sum(n for n in counts.values() if n >= 2) / len(content), 1.0)
 
         exclaim = min(text.count("!") / 3.0, 1.0)
-        laugh = 1.0 if any(t in LAUGH_TOKENS for t in tokens) else 0.0
+        laugh_audio = peak_in(self.laughter, start, end)
+        reaction = peak_in(self.laughter, end, end + 1.5)  # laugh right after the last line = payoff landed
+        laugh = max(1.0 if any(t in LAUGH_TOKENS for t in tokens) else 0.0, laugh_audio)
         fit = max(0.0, 1.0 - abs(dur - self.ideal) / self.ideal)
 
         punch, emotion, qa = g("punchline", 0.0), g("emotion", 0.0), g("qa", 0.0)
@@ -121,7 +125,11 @@ class LocalAnalyzer:
             "shareability": 0.30 * density + 0.25 * punch + 0.20 * emotion + 0.15 * repetition + 0.10 * fit,
             "visual_interest": visual_interest,
             "context_completeness": 0.8 * context + 0.2 * fit,
-            "payoff": 0.6 * punch + 0.2 * ending_complete + 0.2 * qa,
+            "payoff": (
+                0.5 * punch + 0.2 * ending_complete + 0.1 * qa + 0.2 * reaction
+                if self.laughter
+                else 0.6 * punch + 0.2 * ending_complete + 0.2 * qa
+            ),
         }
         s["overall"] = (
             0.30 * s["hook"] + 0.25 * s["payoff"] + 0.25 * s["context_completeness"] + 0.20 * s["shareability"]
@@ -136,6 +144,8 @@ class LocalAnalyzer:
             notes += " Visual motion unavailable (neutral 50 used)."
         if needs_context:
             notes += " Clip may need more context."
+        if self.laughter:
+            notes += f" Laughter in clip {laugh_audio * 100:.0f}, reaction after {reaction * 100:.0f}."
         reasoning = (
             f"Local heuristic (profile: {self.cfg.analysis.profile}). Strongest: {top}. Weakest: {low}.{notes} "
             "Weak signals only; not a virality prediction."

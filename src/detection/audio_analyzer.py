@@ -55,3 +55,23 @@ class AudioAnalyzer:
             speech_ratio=speech_ratio,
             silence_ratio=1.0 - speech_ratio,
         )
+
+    def sustained_until(self, start: float, limit: float, ratio: float, max_gap: float = 0.2) -> float:
+        """End time of a loud run (laugh, applause, reaction) that begins right at `start`.
+
+        Returns `start` when nothing loud follows. Never goes past `limit`. Brief dips up to
+        `max_gap` seconds are bridged so a laugh with gaps counts as one reaction.
+        """
+        a = max(0, int(start / FRAME_S))
+        b = max(a, int(limit / FRAME_S))
+        thr = self.ref * ratio
+        allowed_quiet = max(1, round(max_gap / FRAME_S))
+        last, quiet = start, 0
+        for i, v in enumerate(self.rms[a:b]):
+            if v >= thr:
+                last, quiet = (a + i + 1) * FRAME_S, 0
+            else:
+                quiet += 1
+                if quiet > allowed_quiet:
+                    break
+        return min(last, limit)

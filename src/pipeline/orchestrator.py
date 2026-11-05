@@ -8,6 +8,7 @@ from src.analysis.local_analyzer import LocalAnalyzer
 from src.analysis.scoring import rank_clips, select_clips
 from src.detection.audio_analyzer import AudioAnalyzer
 from src.detection.candidate_generator import CandidateGenerator
+from src.detection.laughter import laughter_windows
 from src.detection.scene_detector import detect_scenes
 from src.detection.visual_analyzer import VisualAnalyzer
 from src.models.schemas import RenderedClip, Transcript, VideoMetadata
@@ -37,6 +38,8 @@ class Pipeline:
         self.clips_dir = self.out / "clips"
         self.transcripts_dir = self.out / "transcripts"
         self.analysis_dir = self.out / "analysis"
+        self._audio = None
+        self._laughter: list = []
         self.phase2_cfg = build_phase2_cfg(cfg)  # None unless phase2.enabled; raises ConfigError if broken
 
     # ------------------------------------------------------------------ helpers
@@ -80,7 +83,12 @@ class Pipeline:
             extract_audio(self.input_path, wav)
             transcript: Transcript = WhisperService(self.cfg.whisper).transcribe(wav)
             audio = AudioAnalyzer.from_wav(wav)
+            if self.cfg.analysis.laughter:
+                self._laughter = laughter_windows(wav, transcript)
+        self._audio = audio
         transcript.duration = meta.duration
+        if self._laughter:
+            _dump(self.analysis_dir / "laughter.json", [list(w) for w in self._laughter])
         save_transcript(transcript, self.transcripts_dir)
         if not transcript.segments:
             raise PipelineError("Transcription produced no speech segments; nothing to clip.")
@@ -105,7 +113,7 @@ class Pipeline:
 
     def _analyze(self, candidates, transcript, visual):
         self._step(5, f"Scoring {len(candidates)} candidates locally (profile: {self.cfg.analysis.profile})...")
-        analyses = LocalAnalyzer(self.cfg, visual).analyze(candidates, transcript)
+        analyses = LocalAnalyzer(self.cfg, visual, self._laughter).analyze(candidates, transcript)
         if not analyses:
             raise PipelineError("Local analysis produced no results. Check logs/app.log for details.")
         return analyses
@@ -121,6 +129,7 @@ class Pipeline:
                 meta.duration,
                 self.cfg.boundaries,
                 self.cfg.candidates.max_duration,
+                self._audio,
             )
         selected = select_clips(ranked, selection_for(self.cfg.selection, self.phase2_cfg))
         if len(selected) < self.cfg.selection.num_clips:

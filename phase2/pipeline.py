@@ -15,8 +15,8 @@ from .config import Phase2Cfg
 from .crop import (CropPlan, crop_size, effective_size, output_size, reduce_keyframes,
                    smooth_path, static_y, thin_keyframes, x_expression)
 from .faces import DetectorUnavailable, HaarFaceDetector, sample_faces
-from .ffmpeg_utils import (FFmpegError, build_audio_filter, build_render_command,
-                           build_video_filter, run, validate_output, video_info)
+from .ffmpeg_utils import (FFmpegError, build_audio_filter, build_blur_fit_filter,
+                           build_render_command, build_video_filter, run, validate_output, video_info)
 from .tracking import track_subject
 
 
@@ -71,6 +71,14 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word],
         except DetectorUnavailable as e:
             log.warning("Face tracking unavailable (%s); using centered crop", e)
 
+    presence = (sum(1 for _, cx in raw if cx is not None) / len(raw)) if raw else 0.0
+    wide = sw / sh > out_w / out_h  # blur-fit only makes sense for sources wider than 9:16
+    blur_fit = wide and (cfg.framing.blur_fit == "always" or (
+        cfg.framing.blur_fit == "auto" and cfg.framing.enabled
+        and presence < cfg.framing.min_face_ratio))
+    if blur_fit:
+        log.info("%s: face tracking unreliable (faces in %.0f%% of samples); using blur-fit layout",
+                 out.name, presence * 100)
     path = smooth_path(raw, sw, cw, cfg.framing, cuts)
     kf = reduce_keyframes(thin_keyframes(path, cfg.framing.keyframe_interval), 0.01 * cw)
     plan = CropPlan(cw, ch, x_expression(kf), static_y(cys, ch, sh, cfg.framing.headroom))
@@ -83,7 +91,7 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word],
     cap_words = retime_words(clip_words, keep) if keep else clip_words
 
     face_bottom = None
-    if samples:
+    if samples and not blur_fit:
         bottoms = [(b.y + b.h - plan.y) * out_h / ch for _, bs in samples for b in bs]
         face_bottom = max(bottoms) if bottoms else None
     margin = caption_margin_for_faces(cfg.captions, out_h, face_bottom)
@@ -110,7 +118,11 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word],
                     (tmpd / "fonts").mkdir(exist_ok=True)
                     shutil.copy(ccfg.font_file, tmpd / "fonts" / Path(ccfg.font_file).name)
                     fonts_dir = "fonts"
-            vf = build_video_filter(plan, out_w, out_h, cfg.render.fps, keep, ass_name, fonts_dir)
+            if blur_fit:
+                vf = build_blur_fit_filter(sw, sh, out_w, out_h, cfg.render.fps, keep,
+                                           ass_name, fonts_dir)
+            else:
+                vf = build_video_filter(plan, out_w, out_h, cfg.render.fps, keep, ass_name, fonts_dir)
             cmd = build_render_command(src, out, start, clip_dur, vf, af, cfg.render.crf,
                                        cfg.render.preset, cfg.render.audio_bitrate,
                                        info.has_audio)
@@ -132,6 +144,7 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word],
         d = Path(debug_dir)
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{out.stem}.analysis.json").write_text(json.dumps({
+            "layout": "blur_fit" if blur_fit else "crop", "face_presence": presence,
             "crop": {"cw": cw, "ch": ch, "y": plan.y, "x_expr": plan.x_expr},
             "keyframes": kf, "keep": keep, "scene_cuts": cuts,
             "samples": [(t, [dataclasses.asdict(b) for b in bs]) for t, bs in samples],

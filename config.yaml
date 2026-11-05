@@ -2,7 +2,10 @@ output_dir: output
 logs_dir: logs
 
 whisper:
-  model_path: models/faster-whisper-tiny
+  model: small
+  model_path: null
+  device: cpu
+  compute_type: int8
 
 candidates:
   min_duration: 15
@@ -24,9 +27,14 @@ boundaries:
   lead_in: 0.25
   tail: 0.45
   snap_tolerance: 3.0
+  word_snap: true
+  pause_gap: 0.35
+  laugh_tail: 1.5
+  laugh_threshold: 0.25
 
 analysis:
-  profile: general        # general | comedy | interview | educational | gaming | tutorial
+  profile: comedy         # general | comedy | interview | educational | gaming | tutorial
+  laughter: true
 
 scoring:
   context_penalty: 0.85   # multiplier when the LLM says the clip needs too much context
@@ -95,6 +103,8 @@ phase2:
     match_distance: 0.12
     switch_ratio: 1.4
     hold_seconds: 2.0
+    blur_fit: auto
+    min_face_ratio: 0.6
   captions:
     enabled: true
     font: Arial

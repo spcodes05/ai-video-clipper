@@ -91,8 +91,14 @@ class FramingCfg:
     match_distance: float = 0.12
     switch_ratio: float = 1.4
     hold_seconds: float = 2.0
+    blur_fit: str = "auto"  # auto | always | never: show the whole frame over a blurred copy
+    min_face_ratio: float = 0.6  # auto: use blur_fit when faces are found in fewer samples than this
 
     def validate(self) -> None:
+        if self.blur_fit not in ("auto", "always", "never"):
+            raise ConfigError("framing.blur_fit must be auto, always or never")
+        if not 0 <= self.min_face_ratio <= 1:
+            raise ConfigError("framing.min_face_ratio must be in [0, 1]")
         if self.sample_interval <= 0:
             raise ConfigError("framing.sample_interval must be > 0")
         if self.analysis_width < 160:

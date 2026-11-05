@@ -51,6 +51,10 @@ class BoundaryConfig(_Cfg):
     lead_in: float = 0.25
     tail: float = 0.45
     snap_tolerance: float = 3.0
+    word_snap: bool = True  # snap to word-level sentence starts/ends when word timestamps exist
+    pause_gap: float = 0.35  # a pause this long also counts as a sentence boundary
+    laugh_tail: float = 1.5  # max seconds to hold after the last word so a laugh/reaction can land (0 = off)
+    laugh_threshold: float = 0.25  # reaction counts while loudness stays above this fraction of peak level
 
 
 class LLMConfig(_Cfg):
@@ -123,6 +127,7 @@ class ProfileConfig(_Cfg):
 
 class AnalysisConfig(_Cfg):
     profile: str = "general"
+    laughter: bool = False  # audio laughter detection feeds humor/payoff scores (heuristic, see analysis/laughter.json)
 
 
 DEFAULT_PROFILES: dict[str, ProfileConfig] = {

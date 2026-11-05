@@ -100,6 +100,33 @@ def build_video_filter(plan: CropPlan, out_w: int, out_h: int, fps: int,
     return ",".join(parts)
 
 
+def build_blur_fit_filter(src_w: int, src_h: int, out_w: int, out_h: int, fps: int,
+                          keep: Optional[Sequence[Tuple[float, float]]] = None,
+                          ass_name: Optional[str] = None,
+                          fonts_dir: Optional[str] = None) -> str:
+    """Whole frame scaled to the output width, centred over a blurred, darkened copy of
+    itself that fills the 9:16 canvas. Nothing is cropped away and the source is upscaled
+    far less than a tight 9:16 crop (e.g. 1.3x instead of 4x for 854x480)."""
+    fg_h = int(out_w * src_h / src_w)
+    fg_h -= fg_h % 2
+    bw, bh = max(out_w // 8, 2), max(out_h // 8, 2)
+    bg_cw = min(src_w, int(src_h * out_w / out_h))
+    bg_cw -= bg_cw % 2
+    pre: List[str] = [f"fps={fps}"]
+    if keep:
+        pre += [f"select='{_between(keep)}'", "setpts=N/FRAME_RATE/TB"]
+    graph = (",".join(pre) + ",split=2[a][b];"
+             f"[a]crop={bg_cw}:{src_h}:(iw-{bg_cw})/2:0,scale={bw}:{bh},boxblur=2:2,"
+             f"scale={out_w}:{out_h},eq=brightness=-0.12:saturation=1.1[bg];"
+             f"[b]scale={out_w}:{fg_h}:flags=lanczos,setsar=1[fg];"
+             "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1")
+    if ass_name:
+        graph += f",subtitles=filename={ass_name}"
+        if fonts_dir:
+            graph += f":fontsdir={fonts_dir}"
+    return graph + ",format=yuv420p"
+
+
 def build_audio_filter(loudnorm: bool, target_lufs: float, limiter: bool,
                        keep: Optional[Sequence[Tuple[float, float]]] = None) -> Optional[str]:
     parts: List[str] = []
