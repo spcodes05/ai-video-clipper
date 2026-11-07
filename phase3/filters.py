@@ -36,6 +36,7 @@ class GraphSpec:
     zoom_trans: float = 0.35
     zoom_normal: float = 1.0
     reaction_windows: Sequence[Seg] = ()        # output time; crop mode only -> wide group shot
+    broll: Sequence[Tuple[str, float, float]] = ()   # (file, start, end) output time; inputs 1..n
     bg: BackgroundCfg = field(default_factory=BackgroundCfg)
     panel_blur: bool = True
     panel_blur_strength: float = 20.0
@@ -126,6 +127,13 @@ def build_video_graph(g: GraphSpec) -> str:
         fg = "fgm"
     else:
         fg = "fgc" if need_crop else "fgw"
+
+    for i, (_, a, b) in enumerate(g.broll):          # B-roll covers the panel only; audio is untouched
+        parts.append(f"[{i + 1}:v]fps={g.fps},trim=duration={b - a:.3f},setpts=PTS-STARTPTS+{a:.3f}/TB,"
+                     f"scale={L.fg_w}:{L.fg_h}:force_original_aspect_ratio=increase,"
+                     f"crop={L.fg_w}:{L.fg_h},setsar=1[bv{i}]")
+        parts.append(f"[{fg}][bv{i}]overlay=0:0:enable='between(t,{a:.3f},{b:.3f})':eof_action=pass[fgb{i}]")
+        fg = f"fgb{i}"
 
     tail = f"[bg][{fg}]overlay={L.fg_x}:{L.fg_y},setsar=1"
     if g.ass_name:
@@ -223,10 +231,12 @@ MAX_INLINE_GRAPH = 24000      # Windows command lines are limited to 32,767 char
 
 
 def build_command(src, out_path, start: float, duration: float, graph: str, has_audio: bool,
-                  codec_args: Sequence[str], audio_bitrate: str, script_path: Optional[str] = None
-                  ) -> List[str]:
-    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}",
-           "-i", str(src), "-t", f"{duration:.3f}"]
+                  codec_args: Sequence[str], audio_bitrate: str, script_path: Optional[str] = None,
+                  extra_inputs: Sequence[str] = ()) -> List[str]:
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start:.3f}", "-i", str(src)]
+    for p in extra_inputs:
+        cmd += ["-i", str(p)]
+    cmd += ["-t", f"{duration:.3f}"]
     if script_path:
         cmd += ["-filter_complex_script", script_path]
     else:

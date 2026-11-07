@@ -165,3 +165,17 @@ Known limitations
 - Silence audio uses micro-fades at joins (not overlapping crossfades) so audio stays in sync with the video.
 - GPU encoding (`encoder: auto`) is used only if a test encode succeeds; filters run on CPU.
 - Phase 3 does not run Whisper again; it reuses the transcript from the pipeline.
+
+
+## Phase 3.1 — what changed
+
+- **Hook:** default `clean_white` (white bold, black outline, soft shadow, no background block, fade + slight scale-in, max 2 lines, placed above the panel inside the safe area and never over captions or faces). Styles: `clean_white | minimal_shadow | subtle_pill | creator_custom`. A hook is rendered only when one exists: LLM suggestion (optional advisor, validated against the transcript: no invented names/numbers, no clickbait, no repeating the transcript) or a verified rule (a question asked later in the clip; "Wait For The Reaction" only if a laugh was measured). Otherwise **no hook**. `--hook-text "TEXT"` forces text, `--no-hook` disables.
+- **Captions:** default clean bold, as-spoken case, trailing punctuation dropped, phrase grouping that avoids dangling words ("going | to"), balanced two-line wrapping, one event per phrase with smooth per-word colour tween from Whisper timestamps; only the active word is coloured, emphasis is size-only.
+- **Zoom:** scored from independent evidence (punchline after a beat, laugh follows, loud sentence end, optional LLM-marked moments). A lone "!" never zooms. Levels 1.04 / 1.08 / 1.12 (max once per clip), face-safe, off in contain mode.
+- **Reactions:** audio laugh or >= 2 faces smiling together / visibly moving (OpenCV smile cascade + frame difference) while >= 2 faces are visible -> cut to the group. These are smile/movement proxies, not emotion recognition; surprise, shock, gaze and gestures are NOT detected. MediaPipe was considered but not added (wheel availability on Python 3.13 / Windows is uncertain and it needs a model download).
+- **Cuts:** dramatic pauses before a laugh are kept (up to `dramatic_pause_keep`), cut edges snap to the quietest instant, pacing guard (`max_cuts_per_10s`), jump cuts skip anything near a laugh and emphatic repeats.
+- **Framing:** frontal + profile (mirrored) Haar faces, so side-on single speakers can be cropped; unsure -> contain.
+- **Presets:** added `gaming` (never face-crops, no zoom) and `storytelling` (longer pauses, slow gentle zooms).
+- **B-roll:** now really composited for a user-supplied folder (exact keyword = file-name word, never in first 1.5 s / last 1 s, never during reactions/laughs, panel only, audio untouched). Semantic matching and stock-footage APIs are NOT implemented.
+- **QA:** adds hook/caption overlap + safe-area checks, audio level checks, per-clip `*.preview.md` (framing, hook, captions, zooms, cuts, reactions, B-roll, feature status incl. what was disabled/unavailable).
+- **Advisor (optional):** one cached LLM call per clip for hook + zoom moments using your existing `llm:` section and API key (`phase3.advisor.mode: off` to disable; `auto` uses it only when a key/local endpoint exists). Not exercised against a live API in tests (fake provider only).

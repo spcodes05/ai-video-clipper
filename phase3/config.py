@@ -142,6 +142,7 @@ class GroupCfg:
     group_min_faces: int = 3        # >= this many simultaneous faces -> never crop (contain)
     union_margin: float = 1.25      # two faces are cropped only if their union * margin fits
     contain_when_unsure: bool = True  # AUTO: no reliable face data -> contain instead of centre-crop
+    profile_faces: bool = True      # also detect side-on faces (OpenCV profile cascade, mirrored)
     min_face_ratio: float = 0.6     # fraction of samples that must contain a face to trust tracking
 
     def validate(self) -> None:
@@ -164,6 +165,10 @@ class SilenceCfg:
     crossfade_ms: int = 20          # micro-fade at every join (no clicks)
     max_cut_ratio: float = 0.35     # never remove more than this fraction of the clip
     max_segments: int = 40
+    dramatic_pause_min: float = 0.8   # a pause this long before a laugh/short payoff is never cut down
+    dramatic_pause_keep: float = 2.5  # ...up to this length
+    snap_ms: int = 40                 # move each cut to the quietest instant within +-snap_ms (no clicks)
+    max_cuts_per_10s: float = 4.0     # pacing guard
 
     def validate(self) -> None:
         if not -80 <= self.threshold_db <= -10:
@@ -184,7 +189,7 @@ class JumpCutCfg:
     remove_fillers: bool = True
     remove_repeats: bool = True
     max_filler_seconds: float = 0.9
-    min_segment: float = 0.45       # no keep-segment shorter than this between two cuts
+    min_segment: float = 0.8        # no keep-segment shorter than this between two cuts
     max_cut_ratio: float = 0.15
 
     def validate(self) -> None:
@@ -196,26 +201,30 @@ class JumpCutCfg:
 class ZoomCfg:
     enabled: bool = True
     normal_scale: float = 1.0
-    emphasis_scale: float = 1.08
-    maximum_scale: float = 1.15
-    transition_duration: float = 0.35
+    small_scale: float = 1.04       # one solid signal
+    emphasis_scale: float = 1.08    # strong moment (punchline after a beat, LLM-marked, loud + sentence end)
+    maximum_scale: float = 1.12     # reserved for the best moment of the clip (punchline + laugh / reaction)
+    transition_duration: float = 0.4
     min_event_seconds: float = 1.2
     max_event_seconds: float = 2.6
-    min_spacing: float = 3.0
-    max_fraction: float = 0.35      # at most this share of the clip is zoomed
-    min_score: float = 1.0          # emphasis score a moment needs to earn a zoom
+    min_spacing: float = 3.5
+    max_fraction: float = 0.3       # at most this share of the clip is zoomed
+    min_score: float = 1.2          # a moment needs this much combined evidence to earn a zoom
+    min_signals: int = 2            # ...from at least this many independent signals (or one very strong one)
     face_safe: bool = True          # never zoom so far that a tracked face is cut off
 
     def validate(self) -> None:
-        if not 1.0 <= self.normal_scale <= self.emphasis_scale <= self.maximum_scale <= 1.5:
+        if not 1.0 <= self.normal_scale <= self.small_scale <= self.emphasis_scale <= self.maximum_scale <= 1.5:
             raise Phase3ConfigError(
-                "zoom: require 1.0 <= normal_scale <= emphasis_scale <= maximum_scale <= 1.5")
+                "zoom: require 1.0 <= normal_scale <= small_scale <= emphasis_scale <= maximum_scale <= 1.5")
         if self.transition_duration <= 0.05:
             raise Phase3ConfigError("zoom.transition_duration must be > 0.05")
         if self.min_event_seconds < 2 * self.transition_duration:
             raise Phase3ConfigError("zoom.min_event_seconds must be >= 2 * transition_duration")
         if self.max_event_seconds < self.min_event_seconds or not 0 < self.max_fraction <= 1:
             raise Phase3ConfigError("zoom: max_event_seconds >= min_event_seconds, 0 < max_fraction <= 1")
+        if self.min_signals < 1:
+            raise Phase3ConfigError("zoom.min_signals must be >= 1")
 
 
 @dataclass
@@ -226,28 +235,35 @@ class ReactionCfg:
     min_laughter_score: float = 0.35
     min_faces: int = 2
     min_face_ratio: float = 0.5     # fraction of samples inside the window that must show >= min_faces
+    visual: bool = True             # also look for sustained smiles / head motion (OpenCV, CPU)
+    min_smile_faces: int = 2        # faces that must smile together for a visual group reaction
+    smile_ratio: float = 0.5        # share of samples in the window that must show it
+    motion_threshold: float = 12.0  # mean abs frame difference inside a face that counts as "animated"
 
     def validate(self) -> None:
         if self.min_window <= 0 or self.max_window < self.min_window or self.min_faces < 2:
             raise Phase3ConfigError("reactions: min_window > 0, max_window >= min_window, min_faces >= 2")
+        if self.min_smile_faces < 2 or not 0 < self.smile_ratio <= 1 or self.motion_threshold <= 0:
+            raise Phase3ConfigError("reactions: min_smile_faces >= 2, 0 < smile_ratio <= 1, motion_threshold > 0")
 
 
 @dataclass
 class CaptionsCfg:
     enabled: bool = True
-    style: str = "bold"             # classic | bold | karaoke | highlighted | minimal
-    font: str = "Arial"
+    style: str = "bold"             # classic | bold (clean bold) | karaoke | highlighted | minimal
+    font: str = "Arial"             # any installed bold sans-serif (e.g. "Segoe UI", "Montserrat") or font_file
     font_file: Optional[str] = None
-    font_size: int = 72
-    min_font_size: int = 48
+    font_size: int = 64
+    min_font_size: int = 44
     primary: str = "FFFFFF"
-    highlight: str = "FFE600"
-    emphasis_color: str = "FF4D4D"
+    highlight: str = "FFD93B"       # active word only
+    emphasis_color: str = "FFFFFF"  # important words are emphasised by size, not by a new colour
     outline_color: str = "000000"
-    outline: int = 6
-    shadow: int = 2
-    max_words: int = 4
-    max_chars: int = 20
+    outline: int = 5
+    shadow: int = 1
+    text_case: str = "auto"         # auto (as spoken) | sentence | upper
+    max_words: int = 6
+    max_chars: int = 22             # per line
     max_lines: int = 2
     position: str = "below"         # below | over_panel | above | custom
     gap: int = 24                   # px between panel edge and caption block
@@ -266,6 +282,8 @@ class CaptionsCfg:
         for n in ("primary", "highlight", "emphasis_color", "outline_color"):
             if not _HEX.match(getattr(self, n)):
                 raise Phase3ConfigError(f"captions.{n} must be RRGGBB")
+        if self.text_case not in ("auto", "sentence", "upper"):
+            raise Phase3ConfigError("captions.text_case must be auto, sentence or upper")
         if self.font_size < 16 or not 8 <= self.min_font_size <= self.font_size:
             raise Phase3ConfigError("captions: font_size >= 16 and 8 <= min_font_size <= font_size")
         if self.max_words < 1 or self.max_chars < 5 or not 1 <= self.max_lines <= 3:
@@ -282,30 +300,69 @@ class CaptionsCfg:
             raise Phase3ConfigError("captions.min_word_seconds and max_gap must be > 0")
 
 
+HOOK_STYLES = ("clean_white", "minimal_shadow", "subtle_pill", "creator_custom")
+
+
 @dataclass
 class HookCfg:
-    enabled: bool = True
-    text: Optional[str] = None      # manual override (still rendered by the hook style)
-    mode: str = "auto"              # auto | quote | template
+    enabled: bool = False
+    style: str = "clean_white"      # clean_white | minimal_shadow | subtle_pill | creator_custom
+    text: Optional[str] = None      # manual override (rendered with the chosen style)
+    mode: str = "auto"              # auto | quote | template   (rule-based fallback behaviour)
     duration: float = 2.5
     max_words: int = 8
-    font_size: int = 70
-    text_color: str = "000000"
-    box_color: str = "FFE600"
-    y_ratio: Optional[float] = None  # None -> centred between the safe top and the panel
+    max_lines: int = 2
+    font_size: int = 54             # authored for 1080 wide; scaled with the canvas
+    min_font_size: int = 34
+    text_color: str = "FFFFFF"
+    outline_color: str = "000000"
+    outline: float = 3.0            # creator_custom
+    shadow: float = 2.0             # creator_custom
+    background: str = "none"        # none | pill        (creator_custom; subtle_pill is always a pill)
+    background_color: str = "000000"
+    background_opacity: float = 0.35
+    text_case: str = "auto"         # auto | sentence | title | upper | as_is
+    y_ratio: Optional[float] = None  # None -> centred in the free space above the panel
     fade_in: float = 0.2
     fade_out: float = 0.3
+    scale_in: bool = True           # 94% -> 100% during the fade-in
+    avoid_faces: bool = True        # never place the hook over a detected face
+    min_score: float = 1.0          # rule-based candidates below this -> no hook at all
 
     def validate(self) -> None:
+        if self.style not in HOOK_STYLES:
+            raise Phase3ConfigError(f"hook.style must be one of {HOOK_STYLES}")
         if self.mode not in ("auto", "quote", "template"):
             raise Phase3ConfigError("hook.mode must be auto, quote or template")
-        if not 0.5 <= self.duration <= 6.0 or self.max_words < 2 or self.font_size < 24:
-            raise Phase3ConfigError("hook: 0.5 <= duration <= 6, max_words >= 2, font_size >= 24")
+        if not 0.5 <= self.duration <= 6.0 or self.max_words < 2 or not 1 <= self.max_lines <= 3:
+            raise Phase3ConfigError("hook: 0.5 <= duration <= 6, max_words >= 2, max_lines 1..3")
+        if self.font_size < 24 or not 12 <= self.min_font_size <= self.font_size:
+            raise Phase3ConfigError("hook: font_size >= 24 and 12 <= min_font_size <= font_size")
         if self.y_ratio is not None and not 0 <= self.y_ratio <= 1:
             raise Phase3ConfigError("hook.y_ratio must be in [0, 1]")
-        for n in ("text_color", "box_color"):
+        for n in ("text_color", "outline_color", "background_color"):
             if not _HEX.match(getattr(self, n)):
                 raise Phase3ConfigError(f"hook.{n} must be RRGGBB")
+        if self.background not in ("none", "pill"):
+            raise Phase3ConfigError("hook.background must be none or pill")
+        if self.text_case not in ("auto", "sentence", "title", "upper", "as_is"):
+            raise Phase3ConfigError("hook.text_case must be auto, sentence, title, upper or as_is")
+        if not 0 <= self.background_opacity <= 1 or self.outline < 0 or self.shadow < 0:
+            raise Phase3ConfigError("hook: 0 <= background_opacity <= 1, outline/shadow >= 0")
+        if self.fade_in < 0 or self.fade_out < 0 or self.fade_in + self.fade_out > self.duration:
+            raise Phase3ConfigError("hook: fades must fit inside duration")
+
+
+@dataclass
+class AdvisorCfg:
+    """Optional LLM help for the hook and for zoom moments (one small call per clip, cached)."""
+    mode: str = "auto"              # auto (only if an API key / local endpoint is configured) | on | off
+    hook: bool = True
+    zoom_moments: bool = True
+
+    def validate(self) -> None:
+        if self.mode not in ("auto", "on", "off"):
+            raise Phase3ConfigError("advisor.mode must be auto, on or off")
 
 
 @dataclass
@@ -314,8 +371,13 @@ class BrollCfg:
     provider: str = "none"          # none | folder
     folder: Optional[str] = None
     max_inserts: int = 3
+    max_seconds: float = 2.0
+    min_gap: float = 4.0            # minimum seconds between inserts
+    min_word_chars: int = 5
 
     def validate(self) -> None:
+        if self.max_seconds <= 0 or self.min_gap < 0 or self.max_inserts < 0:
+            raise Phase3ConfigError("broll: max_seconds > 0, min_gap >= 0, max_inserts >= 0")
         if self.provider not in ("none", "folder"):
             raise Phase3ConfigError("broll.provider must be none or folder")
         if self.enabled and self.provider == "folder" and not self.folder:
@@ -334,6 +396,9 @@ class QACfg:
     blank_luma: float = 6.0
     blank_std: float = 2.0
     min_bg_luma: float = 4.0
+    check_audio: bool = True
+    min_mean_volume_db: float = -40.0
+    max_peak_db: float = -0.1
 
     def validate(self) -> None:
         if self.min_seconds <= 0 or self.max_seconds < self.min_seconds:
@@ -348,45 +413,69 @@ class QACfg:
 PRESETS: Dict[str, Dict[str, Any]] = {
     "general": {
         "foreground": {"fit_mode": "auto"},
-        "zoom": {"enabled": True, "emphasis_scale": 1.08, "maximum_scale": 1.15},
+        "zoom": {"enabled": True, "small_scale": 1.04, "emphasis_scale": 1.07, "maximum_scale": 1.12},
         "captions": {"style": "bold"},
         "silence_removal": {"enabled": True},
         "jump_cuts": {"enabled": False},
         "reactions": {"enabled": True},
-        "hook": {"enabled": True},
+        "hook": {"enabled": False, "style": "clean_white"},
     },
     "podcast": {
         "foreground": {"fit_mode": "auto"},
         "group": {"group_min_faces": 3},
-        "zoom": {"enabled": True, "emphasis_scale": 1.06, "maximum_scale": 1.12,
-                 "min_spacing": 4.0, "max_fraction": 0.25},
+        "zoom": {"enabled": True, "small_scale": 1.03, "emphasis_scale": 1.06, "maximum_scale": 1.10,
+                 "min_spacing": 4.5, "max_fraction": 0.22},
         "captions": {"style": "bold"},
         "silence_removal": {"enabled": True, "minimum_silence_duration": 0.7, "keep_pause": 0.4},
         "jump_cuts": {"enabled": True},
         "reactions": {"enabled": True},
-        "hook": {"enabled": True},
+        "hook": {"enabled": False, "style": "clean_white"},
     },
     "comedy": {
         "foreground": {"fit_mode": "auto"},
-        "zoom": {"enabled": True, "emphasis_scale": 1.10, "maximum_scale": 1.16,
-                 "transition_duration": 0.25, "min_score": 0.9},
+        "zoom": {"enabled": True, "small_scale": 1.04, "emphasis_scale": 1.08, "maximum_scale": 1.12,
+                 "transition_duration": 0.3, "min_score": 1.1},
         "captions": {"style": "highlighted", "emphasis": True},
         "silence_removal": {"enabled": True, "preserve_comedic_pauses": True,
-                            "minimum_silence_duration": 0.9, "comedic_keep": 1.2},
+                            "minimum_silence_duration": 0.9, "comedic_keep": 1.2,
+                            "dramatic_pause_keep": 3.0},
         "jump_cuts": {"enabled": False},
         "reactions": {"enabled": True, "min_laughter_score": 0.3},
-        "hook": {"enabled": True},
+        "hook": {"enabled": False, "style": "clean_white"},
     },
     "interview": {
         "foreground": {"fit_mode": "auto"},
         "group": {"group_min_faces": 4},
-        "zoom": {"enabled": True, "emphasis_scale": 1.04, "maximum_scale": 1.08,
-                 "min_spacing": 5.0, "max_fraction": 0.2},
+        "zoom": {"enabled": True, "small_scale": 1.02, "emphasis_scale": 1.04, "maximum_scale": 1.07,
+                 "min_spacing": 5.5, "max_fraction": 0.18},
         "captions": {"style": "classic", "emphasis": False},
         "silence_removal": {"enabled": True, "minimum_silence_duration": 0.8, "keep_pause": 0.45},
         "jump_cuts": {"enabled": False},
         "reactions": {"enabled": False},
-        "hook": {"enabled": True},
+        "hook": {"enabled": False, "style": "clean_white"},
+    },
+    # Gameplay: no assumptions about faces/webcams -> never face-crop, whole frame stays visible.
+    "gaming": {
+        "foreground": {"fit_mode": "contain"},
+        "zoom": {"enabled": False},
+        "captions": {"style": "bold", "emphasis": True},
+        "silence_removal": {"enabled": True, "minimum_silence_duration": 0.5, "keep_pause": 0.25},
+        "jump_cuts": {"enabled": True},
+        "reactions": {"enabled": False},
+        "hook": {"enabled": False, "style": "clean_white"},
+    },
+    # Narrative: slower pacing, longer pauses survive, gentle emphasis only.
+    "storytelling": {
+        "foreground": {"fit_mode": "auto"},
+        "zoom": {"enabled": True, "small_scale": 1.03, "emphasis_scale": 1.06, "maximum_scale": 1.09,
+                 "transition_duration": 0.6, "min_event_seconds": 1.6, "min_spacing": 6.0,
+                 "max_fraction": 0.2},
+        "captions": {"style": "classic", "emphasis": True},
+        "silence_removal": {"enabled": True, "minimum_silence_duration": 1.0, "keep_pause": 0.55,
+                            "comedic_keep": 1.6, "dramatic_pause_keep": 3.0},
+        "jump_cuts": {"enabled": False},
+        "reactions": {"enabled": True},
+        "hook": {"enabled": False, "style": "clean_white"},
     },
 }
 EDITING_STYLES = tuple(sorted(PRESETS))
@@ -456,6 +545,7 @@ class Phase3Cfg:
     background: BackgroundCfg = field(default_factory=BackgroundCfg)
     framing: FramingCfg = field(default_factory=FramingCfg)
     group: GroupCfg = field(default_factory=GroupCfg)
+    advisor: AdvisorCfg = field(default_factory=AdvisorCfg)
     silence_removal: SilenceCfg = field(default_factory=SilenceCfg)
     jump_cuts: JumpCutCfg = field(default_factory=JumpCutCfg)
     zoom: ZoomCfg = field(default_factory=ZoomCfg)

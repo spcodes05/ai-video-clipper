@@ -12,7 +12,7 @@ from phase2.boundaries import Word, is_sentence_end
 from phase2.ffmpeg_utils import FFMPEG
 
 from .config import SilenceCfg
-from .timeline import Seg, complement
+from .timeline import Seg, complement, limit_cut_density, snap_cuts_to_quiet
 
 log = logging.getLogger("phase3.silence")
 SR = 16000
@@ -76,14 +76,22 @@ class SilencePlan:
     threshold_db: float = 0.0
 
 
-def _is_comedic_gap(prev: Word, nxt: Word, nxt_sentence_words: int,
-                    laughter: Sequence[Seg]) -> bool:
-    """Setup -> beat -> payoff. A pause after a sentence/question that is followed by a short
-    line is treated as comic timing; so is any pause touching a laugh/reaction window."""
+def _pause_class(prev: Word, nxt: Word, nxt_sentence_words: int, laughter: Sequence[Seg],
+                 cfg: SilenceCfg) -> str:
+    """normal | comedic | dramatic.
+
+    dramatic: a held beat right before a payoff (a laugh within 3 s, or a short exclamation/question) -
+    never cut down. comedic: setup -> beat -> short line, or any pause touching a laugh."""
+    gap = nxt.start - prev.end
+    laugh_soon = any(nxt.start - 0.2 <= a <= nxt.start + 3.0 for a, _ in laughter)
+    if gap >= cfg.dramatic_pause_min and laugh_soon:
+        return "dramatic"
     if any(a < nxt.start + 0.5 and b > prev.end - 0.3 for a, b in laughter):
-        return True
+        return "comedic"
     ends = is_sentence_end(prev) or prev.text.strip().endswith(("...", "—", "-"))
-    return ends and nxt_sentence_words <= 8
+    if ends and nxt_sentence_words <= 8:
+        return "comedic"
+    return "normal"
 
 
 def _sentence_len_from(words: Sequence[Word], i: int) -> int:
@@ -107,7 +115,7 @@ def validate_keep(words: Sequence[Word], keep: Sequence[Seg], tol: float = 0.01)
 def plan_silence(words: Sequence[Word], duration: float, silences: Optional[Sequence[Seg]],
                  cfg: SilenceCfg, laughter: Sequence[Seg] = (),
                  extra_cuts: Sequence[Seg] = (), thr: float = 0.0,
-                 cut_ok: Sequence[Word] = ()) -> SilencePlan:
+                 cut_ok: Sequence[Word] = (), db=None) -> SilencePlan:
     """Cut only the part of a between-word gap that the audio confirms is silent.
 
     * speech is padded by `padding` on both sides (words are never touched);
@@ -119,22 +127,24 @@ def plan_silence(words: Sequence[Word], duration: float, silences: Optional[Sequ
     if not ws:
         return SilencePlan([(0.0, duration)], threshold_db=thr)
 
-    gaps: List[Tuple[float, float, bool]] = []            # (gap_start, gap_end, comedic)
+    gaps: List[Tuple[float, float, object]] = []         # (gap_start, gap_end, pause class)
     if ws[0].start > cfg.minimum_silence_duration:
-        gaps.append((0.0, ws[0].start, False))
+        gaps.append((0.0, ws[0].start, "normal"))
     comedic_n = 0
     for i in range(len(ws) - 1):
         a, b = ws[i], ws[i + 1]
         if b.start - a.end >= cfg.minimum_silence_duration:
-            com = cfg.preserve_comedic_pauses and _is_comedic_gap(
-                a, b, _sentence_len_from(ws, i + 1), laughter)
-            gaps.append((a.end, b.start, com))
+            cls = _pause_class(a, b, _sentence_len_from(ws, i + 1), laughter, cfg) \
+                if cfg.preserve_comedic_pauses else "normal"
+            gaps.append((a.end, b.start, cls))
     if duration - ws[-1].end > cfg.minimum_silence_duration:
-        gaps.append((ws[-1].end, duration, False))
+        gaps.append((ws[-1].end, duration, "normal"))
 
     cuts: List[Tuple[float, Seg]] = []                    # (cut length, span)
-    for g0, g1, com in gaps:
-        keep_total = cfg.comedic_keep if com else cfg.keep_pause
+    for g0, g1, cls in gaps:
+        com = cls in ("comedic", "dramatic")
+        keep_total = (cfg.dramatic_pause_keep if cls == "dramatic"
+                      else cfg.comedic_keep if cls == "comedic" else cfg.keep_pause)
         keep_total = max(keep_total, 2 * cfg.padding)
         head = g0 == 0.0 and ws[0].start == g1
         tail = g1 == duration and ws[-1].end == g0
@@ -171,7 +181,9 @@ def plan_silence(words: Sequence[Word], duration: float, silences: Optional[Sequ
             length = room
         chosen.append(span)
         total += length
+    chosen = snap_cuts_to_quiet(chosen, db, cfg.snap_ms, limits=silences) if silences else chosen
     chosen += [c for c in extra_cuts]
+    chosen = limit_cut_density(chosen, duration, cfg.max_cuts_per_10s)
     keep = complement(chosen, duration)
 
     if len(keep) > cfg.max_segments:                      # too choppy: drop the smallest cuts

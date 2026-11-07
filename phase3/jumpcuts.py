@@ -48,8 +48,11 @@ def plan_jump_cuts(words: Sequence[Word], duration: float, cfg: JumpCutCfg,
     last_end = -1e9
     for i, kind in cand:
         w = ws[i]
-        if any(a < w.end and b > w.start for a, b in laughter):
-            continue
+        if any(a - 1.0 < w.end and b + 0.5 > w.start for a, b in laughter):
+            continue                                   # near a laugh: it may be part of the joke
+        if kind == "repeat" and (ws[i + 1].text.strip().endswith(("!", "?")) or
+                                 (i + 2 < len(ws) and ws[i + 2].text.strip().endswith("!"))):
+            continue                                   # emphatic repetition is delivery, not a stutter
         prev_end = ws[i - 1].end if i > 0 else 0.0
         next_start = ws[i + 1].start if i + 1 < len(ws) else duration
         a = max(w.start - 0.03, (prev_end + w.start) / 2)

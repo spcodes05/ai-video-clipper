@@ -52,6 +52,19 @@ def probe_streams(path) -> dict:
             "a_start": float((a or {}).get("start_time") or 0.0)}
 
 
+def _volume(path: Path):
+    """(mean_volume_db, max_volume_db) from FFmpeg volumedetect, or None."""
+    import re as _re
+    p = subprocess.run([FFMPEG, "-hide_banner", "-nostats", "-i", str(path), "-vn", "-af", "volumedetect",
+                        "-f", "null", "-"], capture_output=True, check=False)
+    txt = p.stderr.decode("utf-8", "replace")
+    m, x = _re.search(r"mean_volume:\s*(-?[\d.]+|-inf)", txt), _re.search(r"max_volume:\s*(-?[\d.]+|-inf)", txt)
+    if not m or not x:
+        return None
+    f = lambda v: -120.0 if v == "-inf" else float(v)
+    return f(m.group(1)), f(x.group(1))
+
+
 def _laplacian_var(cv2, gray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
@@ -108,6 +121,18 @@ def check_clip(path, layout: Layout, expected_duration: float, cfg: Phase3Cfg, i
             rep.issues.append("captions enabled but none were generated")
         for m in info.get("caption_geometry_issues", []):
             rep.issues.append(m)
+    for m in info.get("hook_issues", []):
+        rep.issues.append(m)
+    if q.check_audio and info.get("src_has_audio", True) and s["a"] is not None:
+        vol = _volume(p)
+        if vol:
+            rep.checks.update(mean_volume_db=vol[0], peak_db=vol[1])
+            if vol[0] < -60:
+                rep.issues.append(f"audio is silent (mean volume {vol[0]:.1f} dB)")
+            elif vol[0] < q.min_mean_volume_db:
+                rep.warnings.append(f"audio is very quiet (mean volume {vol[0]:.1f} dB)")
+            if vol[1] > q.max_peak_db:
+                rep.warnings.append(f"audio peaks at {vol[1]:.1f} dB (clipping risk)")
     ratio = info.get("face_clip_ratio")
     if ratio is not None:
         rep.checks["face_clip_ratio"] = round(ratio, 3)
@@ -227,3 +252,38 @@ def contact_sheet(path, layout: Layout, out_jpg, frames: int = 6) -> bool:
         return False
     Path(out_jpg).parent.mkdir(parents=True, exist_ok=True)
     return bool(cv2.imwrite(str(out_jpg), np.hstack(tiles)))
+
+
+def write_preview(rep: dict, path) -> None:
+    """Human-readable per-clip summary (what was done, what was not, and why)."""
+    L = []
+    add = L.append
+    add(f"# {rep.get('clip', 'clip')}  -  edit preview\n")
+    fr = rep.get("framing", {})
+    add(f"- **Framing:** {fr.get('mode')} ({fr.get('reason')}); faces p90={fr.get('faces_p90')}, "
+        f"presence={fr.get('face_presence')}")
+    h = rep.get("hook") or {}
+    add(f"- **Hook:** {h.get('text') or 'none'}"
+        + (f" ({h.get('source')}, style {h.get('style')})" if h.get("text") else f" - {h.get('reason', '')}"))
+    c = rep.get("captions", {})
+    add(f"- **Captions:** style {c.get('style')} at y={c.get('y')} ({c.get('position')}, "
+        f"{c.get('groups')} phrases, styled={c.get('styled')})")
+    cuts = rep.get("cuts", {})
+    add(f"- **Removed:** {cuts.get('removed_seconds')} s via {len(cuts.get('segments') or [])} segments; "
+        f"jump cuts {cuts.get('jump_cuts')}; comedic/dramatic pauses preserved: {cuts.get('comedic_pauses_preserved')}")
+    z = rep.get("zoom", [])
+    add("- **Zoom events:** " + (", ".join(f"{e['start']:.1f}-{e['end']:.1f}s x{e['scale']} ({e['reason']})" for e in z) or "none"))
+    add(f"- **Reaction windows:** {rep.get('reaction_shots') or 'none'} (basis: {rep.get('reaction_basis') or '-'})")
+    b = rep.get("broll", {})
+    add(f"- **B-roll:** {b.get('status', 'disabled')}")
+    add(f"- **Render:** {rep.get('output_duration')} s, encoder {rep.get('encoder')}")
+    add("\n## Feature status")
+    for k, v in (rep.get("features") or {}).items():
+        add(f"- {k}: {v}")
+    qa = rep.get("qa", {})
+    add(f"\n## QA: {'PASS' if qa.get('ok') else 'FAIL'}")
+    for m in qa.get("issues", []):
+        add(f"- ISSUE: {m}")
+    for m in qa.get("warnings", []):
+        add(f"- warning: {m}")
+    Path(path).write_text("\n".join(L) + "\n", encoding="utf-8")

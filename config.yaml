@@ -153,7 +153,7 @@ phase2:
 # ---------------------------------------------------------------------------
 phase3:
   enabled: false
-  preset: general            # general | podcast | comedy | interview   (--editing-style)
+  preset: general            # general | podcast | comedy | interview | gaming | storytelling   (--editing-style)
   output:
     aspect_ratio: "9:16"
     # resolution: "1080x1920"   # default: video.width x video.height
@@ -169,13 +169,24 @@ phase3:
     enabled: true
     mode: blur               # blur | solid
     blur_strength: 24
-  # group: {group_min_faces: 3, contain_when_unsure: true}
+  # group: {group_min_faces: 3, contain_when_unsure: true, profile_faces: true}
   # silence_removal: {enabled: true, threshold_db: -38, minimum_silence_duration: 0.6, padding: 0.12,
-  #                   keep_pause: 0.35, preserve_comedic_pauses: true, crossfade_ms: 20}
-  # jump_cuts: {enabled: false}
-  # zoom: {enabled: true, normal_scale: 1.0, emphasis_scale: 1.08, maximum_scale: 1.15, transition_duration: 0.35}
-  # reactions: {enabled: true}
-  # captions: {style: bold, position: below, font_size: 72, safe_bottom: 200}   # classic|bold|karaoke|highlighted|minimal
-  # hook: {enabled: true, text: null, duration: 2.5}
-  # broll: {enabled: false, provider: none, folder: null}
+  #                   keep_pause: 0.35, preserve_comedic_pauses: true, dramatic_pause_keep: 2.5,
+  #                   crossfade_ms: 20, max_cuts_per_10s: 4}
+  # jump_cuts: {enabled: false, min_segment: 0.8}          # um/uh + function-word stutters, never near laughs
+  # zoom: {enabled: true, small_scale: 1.04, emphasis_scale: 1.08, maximum_scale: 1.12, transition_duration: 0.4}
+  # reactions: {enabled: true, visual: true}               # audio laugh + smiling/animated faces -> group shot
+  # captions: {style: bold, font: Arial, font_size: 64, position: below, emphasis: true}
+  #                                                         # classic | bold | karaoke | highlighted | minimal
+  # hook:
+  #   enabled: true
+  #   style: clean_white      # clean_white | minimal_shadow | subtle_pill | creator_custom
+  #   font_size: 54
+  #   duration: 2.5
+  #   fade_in: 0.2
+  #   fade_out: 0.3
+  #   background: none        # none | pill (creator_custom only)
+  #   max_words: 8
+  # advisor: {mode: auto, hook: true, zoom_moments: true}  # optional LLM (uses llm: section + API key); off = local only
+  # broll: {enabled: false, provider: folder, folder: "broll"}  # file name word == spoken word, e.g. coffee.mp4
   # qa: {enabled: true, contact_sheet: true, max_face_clip_ratio: 0.25}

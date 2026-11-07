@@ -41,3 +41,25 @@ def build_phase3_cfg(cfg: AppConfig):
              p3.preset, w, h, p3.foreground.aspect_ratio, p3.foreground.fit_mode, p3.captions.style,
              p3.zoom.enabled, p3.silence_removal.enabled, p3.hook.enabled)
     return p3
+
+
+def build_advisor(cfg: AppConfig, p3, cache_dir=None):
+    """Optional LLM advisor (hook + zoom moments). None unless phase3.advisor.mode is on, or auto with a
+    configured key/local endpoint. One small cached call per clip; any failure falls back to local rules."""
+    mode = p3.advisor.mode
+    if mode == "off" or not (p3.hook.enabled or p3.zoom.enabled):
+        return None
+    try:
+        from src.llm.openai_provider import OpenAIProvider
+        from src.utils.errors import LLMError
+        from phase3.advisor import EditAdvisor
+        l = cfg.llm
+        provider = OpenAIProvider(model=l.model, temperature=l.temperature, base_url=l.base_url,
+                                  api_key_env=l.api_key_env, requests_per_minute=l.requests_per_minute)
+        log.info("Phase 3 LLM advisor enabled (%s)", l.model)
+        return EditAdvisor(provider, cache_dir, p3.advisor.hook, p3.advisor.zoom_moments)
+    except Exception as exc:  # noqa: BLE001
+        if mode == "on":
+            raise ConfigError(f"phase3.advisor.mode is 'on' but the LLM is unavailable: {exc}") from exc
+        log.info("Phase 3 LLM advisor not used (%s); local heuristics only", exc)
+        return None

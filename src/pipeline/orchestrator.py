@@ -14,7 +14,7 @@ from src.detection.visual_analyzer import VisualAnalyzer
 from src.models.schemas import RenderedClip, Transcript, VideoMetadata
 from src.pipeline.config import AppConfig
 from src.pipeline.phase2_bridge import build_phase2_cfg, scene_cuts_from, selection_for
-from src.pipeline.phase3_bridge import build_phase3_cfg
+from src.pipeline.phase3_bridge import build_advisor, build_phase3_cfg
 from src.transcription.whisper_service import WhisperService, save_transcript
 from src.utils.errors import FFmpegError, PipelineError
 from src.utils.ffmpeg import check_ffmpeg, extract_audio, probe_video, validate_video
@@ -159,6 +159,8 @@ class Pipeline:
             self.analysis_dir / "captions",
             phase2_cfg=self.phase2_cfg,
             phase3_cfg=self.phase3_cfg,
+            advisor=build_advisor(self.cfg, self.phase3_cfg, self.analysis_dir / "advisor")
+            if self.phase3_cfg else None,
         )
         rendered: list[RenderedClip] = []
         report: list[dict] = []

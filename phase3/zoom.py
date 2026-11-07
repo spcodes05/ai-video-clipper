@@ -59,54 +59,69 @@ def split_sentences(words: Sequence[Word], gap: float = 0.9) -> List[Sentence]:
     return out
 
 
-def sentence_score(i: int, sents: Sequence[Sentence], energy_db: Optional[np.ndarray],
-                   energy_ref: float, laughter: Sequence[Seg]) -> Tuple[float, str]:
+@dataclass(frozen=True)
+class Signal:
+    name: str
+    weight: float
+    strong: bool = False       # strong signals can justify a zoom on their own
+
+
+def sentence_signals(i: int, sents: Sequence[Sentence], energy_db: Optional[np.ndarray], energy_ref: float,
+                     laughter: Sequence[Seg], moments: Sequence[Tuple[float, float, int]] = (),
+                     visual: Sequence[Seg] = ()) -> List[Signal]:
+    """Independent pieces of evidence that this sentence is a moment worth emphasising.
+
+    Punctuation and intensifier words are only weak modifiers: a lone "!" never earns a zoom."""
     s = sents[i]
-    score, why = 0.0, []
-    txt = s.words[-1].text.strip()
-    if txt.endswith("!"):
-        score += 1.0
-        why.append("exclamation")
-    elif txt.endswith("?"):
-        score += 0.3
-    toks = {_NORM.sub("", w.text.lower()) for w in s.words}
-    if toks & INTENSIFIERS:
-        score += 0.4
-        why.append("intensifier")
+    out: List[Signal] = []
+    last = s.words[-1].text.strip()
     if i > 0 and len(s.words) <= 9 and len(sents[i - 1].words) >= 8 and s.start - sents[i - 1].end >= 0.4:
-        score += 1.0
-        why.append("punchline")
+        out.append(Signal("punchline", 1.0))
     if any(s.end - 0.2 <= a <= s.end + 1.6 for a, _ in laughter):
-        score += 1.3
-        why.append("laugh-follows")
+        out.append(Signal("laugh-follows", 1.4, True))
+    for a, b, strength in moments:
+        if a < s.end + 0.3 and b > s.start - 0.3:
+            out.append(Signal("advisor", 0.8 + 0.4 * strength, True))
+            break
+    if any(a < s.end + 0.8 and b > s.start for a, b in visual):
+        out.append(Signal("reaction", 1.0))
     if energy_db is not None and len(energy_db) and energy_ref > -90:
         a, b = int(s.start / 0.02), max(int(s.end / 0.02), int(s.start / 0.02) + 1)
         seg = energy_db[a:b]
-        if len(seg) and float(np.percentile(seg, 90)) > energy_ref + 3.0:
-            score += 0.8
-            why.append("loud")
-    return score, "+".join(why) or "none"
+        if len(seg) and float(np.percentile(seg, 90)) > energy_ref + 4.0 and last[-1:] in ".!?":
+            out.append(Signal("loud", 0.7))
+    if last.endswith("!"):
+        out.append(Signal("exclamation", 0.3))
+    toks = {_NORM.sub("", w.text.lower()) for w in s.words}
+    if toks & INTENSIFIERS:
+        out.append(Signal("intensifier", 0.25))
+    return out
 
 
 def plan_zoom(words: Sequence[Word], duration: float, cfg: ZoomCfg,
               energy_db: Optional[np.ndarray] = None, laughter: Sequence[Seg] = (),
-              blocked: Sequence[Seg] = ()) -> List[ZoomEvent]:
-    """Pick a few emphasis moments. `blocked` windows (e.g. group reaction shots) never zoom."""
-    if not cfg.enabled or cfg.emphasis_scale <= cfg.normal_scale + 1e-6 or not words:
+              blocked: Sequence[Seg] = (), moments: Sequence[Tuple[float, float, int]] = (),
+              visual: Sequence[Seg] = ()) -> List[ZoomEvent]:
+    """Pick a few well-justified moments.
+
+    A moment needs `min_score` of evidence from at least `min_signals` independent signals (weak
+    modifiers do not count), or one strong signal. Level: small (1.04) / strong (1.08); the single
+    best moment of the clip may use the maximum (1.12)."""
+    if not cfg.enabled or cfg.small_scale <= cfg.normal_scale + 1e-6 or not words:
         return []
     sents = split_sentences(words)
     ref = float(np.percentile(energy_db, 75)) if energy_db is not None and len(energy_db) else -90.0
     scored: List[Tuple[float, int, str]] = []
     for i in range(len(sents)):
-        sc, why = sentence_score(i, sents, energy_db, ref, laughter)
-        if sc >= cfg.min_score:
-            scored.append((sc, i, why))
+        sig = sentence_signals(i, sents, energy_db, ref, laughter, moments, visual)
+        main = [x for x in sig if x.weight >= 0.5]
+        score = sum(x.weight for x in sig)
+        if score >= cfg.min_score and (len(main) >= cfg.min_signals or any(x.strong for x in sig)):
+            scored.append((score, i, "+".join(x.name for x in sig)))
     events: List[ZoomEvent] = []
-    used = 0.0
-    budget = cfg.max_fraction * duration
+    used, budget = 0.0, cfg.max_fraction * duration
     for sc, i, why in sorted(scored, key=lambda t: (-t[0], t[1])):
         s = sents[i]
-        # zoom on the emphasised tail of the sentence, not the whole thing
         n_tail = max(1, min(len(s.words), 6))
         a = max(0.0, s.words[-n_tail].start - 0.15)
         b = min(duration, max(s.end + 0.35, a + cfg.min_event_seconds))
@@ -120,7 +135,9 @@ def plan_zoom(words: Sequence[Word], duration: float, cfg: ZoomCfg,
             continue
         if used + (b - a) > budget:
             continue
-        scale = cfg.maximum_scale if (sc >= 2.3 and "laugh-follows" in why) else cfg.emphasis_scale
+        scale = cfg.emphasis_scale if sc >= 1.8 else cfg.small_scale
+        if not events and sc >= 2.4:                      # best moment of the clip
+            scale = cfg.maximum_scale
         events.append(ZoomEvent(round(a, 3), round(b, 3), min(scale, cfg.maximum_scale), why, round(sc, 2)))
         used += b - a
     return sorted(events, key=lambda e: e.start)

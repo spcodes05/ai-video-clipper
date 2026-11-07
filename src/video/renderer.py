@@ -34,6 +34,7 @@ class ClipRenderer:
         captions_dir: Path,
         phase2_cfg=None,
         phase3_cfg=None,
+        advisor=None,
     ):
         self.v = video_cfg
         self.c = caption_cfg
@@ -42,6 +43,7 @@ class ClipRenderer:
         self.reframer.target_w, self.reframer.target_h = video_cfg.width, video_cfg.height
         self.phase2_cfg = phase2_cfg
         self.phase3_cfg = phase3_cfg
+        self.advisor = advisor
         self._detector = None  # shared face detector (loaded once, reused for every clip)
 
     def render(
@@ -82,9 +84,11 @@ class ClipRenderer:
             log.warning("No words found for %s; Phase 3 will render without captions or hook.", out_path.name)
         if self._detector is None and self.phase3_cfg.foreground.fit_mode != "contain":
             try:
-                from phase2.faces import DetectorUnavailable, HaarFaceDetector
-                self._detector = HaarFaceDetector(self.phase3_cfg.framing.min_confidence,
-                                                  self.phase3_cfg.framing.min_neighbors)
+                from phase2.faces import DetectorUnavailable
+                from phase3.framing import make_face_detector
+                self._detector = make_face_detector(self.phase3_cfg.framing.min_confidence,
+                                                    self.phase3_cfg.framing.min_neighbors,
+                                                    self.phase3_cfg.group.profile_faces)
             except DetectorUnavailable as exc:
                 log.warning("Face detector unavailable (%s); framing will fall back to contain", exc)
                 self._detector = False
@@ -94,6 +98,7 @@ class ClipRenderer:
                 speech_segments=speech, scene_cuts=list(scene_cuts), laughter=list(laughter),
                 detector=self._detector or None,
                 report_dir=self.captions_dir.parent / "phase3", log=log,
+                advisor=self.advisor, title=clip.analysis.title or "",
             )
         except FFmpegError:
             raise

@@ -91,3 +91,33 @@ def retime_keyframes(kf: Sequence[Tuple[float, float]], keep: Optional[Sequence[
             out.append((ot, x))
         acc += b - a
     return out
+
+
+def limit_cut_density(cuts: Sequence[Seg], duration: float, per_10s: float) -> List[Seg]:
+    """Pacing guard: keep at most per_10s cuts per 10 seconds (the longest cuts win)."""
+    allowed = max(1, int(per_10s * duration / 10.0 + 0.5))
+    if len(cuts) <= allowed:
+        return list(cuts)
+    best = sorted(cuts, key=lambda c: c[0] - c[1])[:allowed]
+    return sorted(best)
+
+
+def snap_cuts_to_quiet(cuts: Sequence[Seg], db, ms: int, frame: float = 0.02,
+                       limits: Optional[Sequence[Seg]] = None) -> List[Seg]:
+    """Move each cut edge to the quietest 20 ms frame within +-ms, never leaving its allowed span
+    (`limits` = the silent/gap region the cut lives in), so joins land in silence instead of on a
+    waveform peak."""
+    if db is None or len(db) == 0 or ms <= 0:
+        return list(cuts)
+    n = max(1, int(ms / (frame * 1000)))
+    out: List[Seg] = []
+    for a, b in cuts:
+        def best(t: float, lo: float, hi: float) -> float:
+            i = int(round(t / frame))
+            cand = [(float(db[j]), abs(j - i), j) for j in range(max(0, i - n), min(len(db), i + n + 1))
+                    if lo <= j * frame <= hi]
+            return min(cand)[2] * frame if cand else t
+        lim = next(((x, y) for x, y in (limits or []) if x - 1e-6 <= a and b <= y + 1e-6), (a - 0.1, b + 0.1))
+        na, nb = best(a, max(lim[0], a - 0.06), min(a + 0.06, b - 0.1)), best(b, max(b - 0.06, a + 0.1), min(lim[1], b + 0.06))
+        out.append((na, nb) if nb - na >= 0.08 else (a, b))
+    return out

@@ -16,16 +16,20 @@ from phase2.faces import DetectorUnavailable, HaarFaceDetector, sample_faces
 from phase2.ffmpeg_utils import FFmpegError, run, video_info
 
 from . import qa as qa_mod
+from .advisor import AdvisorResult
 from .broll import get_provider, plan_broll
-from .captions import STYLE_SPECS, build_ass, caption_box_inside, plan_placement
+from .captions import (STYLE_SPECS, build_ass, caption_box_inside, hook_box_issues, plan_hook,
+                       plan_placement)
 from .config import Phase3Cfg
 from .filters import (MAX_INLINE_GRAPH, GraphSpec, build_command, build_filter_complex,
                       resolve_encoder, video_codec_args)
-from .framing import FramingDecision, crop_x_at, decide_mode, face_stats, plan_crop
+from .framing import (FramingDecision, crop_x_at, decide_mode, face_stats, hook_face_conflict,
+                      make_face_detector, plan_crop)
 from .hooks import generate_hook
 from .jumpcuts import plan_jump_cuts
 from .layout import compute_layout
-from .reactions import plan_reaction_windows
+from .reactions import (ExpressionUnavailable, analyze_expressions, merge_windows,
+                        plan_reaction_windows, plan_visual_windows)
 from .silence import (SilencePlan, detect_silences, effective_threshold, frame_db, plan_silence,
                       read_audio, validate_keep)
 from .timeline import complement, is_identity, keep_duration, map_interval, retime, retime_keyframes
@@ -73,7 +77,8 @@ def _face_clip_ratio(samples, kf, crop_y: int, cw: int, ch: int, events: Sequenc
 def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: Phase3Cfg, *,
                 speech_segments: Sequence[Tuple[float, float]] = (), scene_cuts: Sequence[float] = (),
                 laughter: Sequence[LaughWindow] = (), detector=None,
-                report_dir: Optional[Path] = None, log: Optional[logging.Logger] = None) -> RenderResult:
+                report_dir: Optional[Path] = None, log: Optional[logging.Logger] = None,
+                advisor=None, title: str = "") -> RenderResult:
     """Render one clip. start/end/words/speech/scene_cuts/laughter are in SOURCE seconds."""
     log = log or logging.getLogger("phase3")
     src, out = Path(src).resolve(), Path(out).resolve()
@@ -95,6 +100,7 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
     laugh_spans = [(a, b) for a, b, _ in laugh]
     speech = [(a - start, b - start) for a, b in speech_segments]
     cuts = [c - start for c in scene_cuts if start < c < end]
+    features: dict = {}
     rep: dict = {"clip": out.name, "source_range": [start, end], "layout": dataclasses.asdict(layout),
                  "preset": cfg.preset, "warnings": []}
 
@@ -103,13 +109,15 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
     faces_ok = False
     if cfg.foreground.fit_mode != "contain":
         try:
-            det = detector or HaarFaceDetector(cfg.framing.min_confidence, cfg.framing.min_neighbors)
+            det = detector or make_face_detector(cfg.framing.min_confidence, cfg.framing.min_neighbors,
+                                                 cfg.group.profile_faces)
             samples = sample_faces(src, start, end, cfg.framing.sample_interval, det,
                                    cfg.framing.analysis_width)
             faces_ok = True
         except DetectorUnavailable as exc:
             log.warning("Face analysis unavailable (%s); framing falls back conservatively", exc)
             rep["warnings"].append(f"face analysis unavailable: {exc}")
+            features["face_analysis"] = f"unavailable ({exc})"
     decision: FramingDecision = decide_mode(cfg.foreground, cfg.group, samples, sw, sh, cw,
                                             layout.fg_ratio, faces_ok)
     stats = decision.stats
@@ -139,7 +147,7 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
         if db is None:
             log.warning("%s: no audio analysis; silence removal uses transcript gaps only", out.name)
         sil_plan = plan_silence(cw_words, dur, silences, cfg.silence_removal, laugh_spans, jc.cuts, thr,
-                                cut_ok=[cw_words[i] for i in jc.removed_idx])
+                                cut_ok=[cw_words[i] for i in jc.removed_idx], db=db)
         keep = sil_plan.keep
     elif jc.cuts:
         keep = complement(jc.cuts, dur)
@@ -156,13 +164,38 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
                    "jump_cuts": jc.reasons if keep else [],
                    "comedic_pauses_preserved": sil_plan.preserved_comedic if sil_plan else 0}
 
+    # ---------------------------------------------------------------- advisor (optional LLM)
+    adv = AdvisorResult()
+    want_hook = cfg.hook.enabled and not cfg.hook.text and cfg.advisor.hook
+    want_moments = cfg.zoom.enabled and decision.mode == "crop" and cfg.advisor.zoom_moments
+    if advisor is not None and cw_words and (want_hook or want_moments):
+        adv = advisor.advise([w for i, w in enumerate(cw_words) if i not in removed], dur,
+                             cfg.hook.max_words, title, bool(laugh_spans))
+        features["advisor"] = "used" if adv.used else f"failed: {adv.error}"
+    else:
+        features["advisor"] = "not configured (local heuristics only)" if advisor is None else "not needed"
+
     # ---------------------------------------------------------------- reactions + zoom
     reaction_clip: List[Tuple[float, float]] = []
+    reaction_basis: List[str] = []
     zoom_events: List[ZoomEvent] = []
     if decision.mode == "crop" and sol is not None:
-        reaction_clip = plan_reaction_windows(laughter, samples, start, end, cfg.reactions)
+        audio_w = plan_reaction_windows(laughter, samples, start, end, cfg.reactions)
+        vis_w: List[Tuple[float, float]] = []
+        if cfg.reactions.enabled and cfg.reactions.visual and sum(1 for _, b in samples if len(b) >= 2) >= 3:
+            try:
+                expr = analyze_expressions(src, start, samples, cfg.reactions)
+                vis_w = plan_visual_windows(expr, cfg.framing.sample_interval, cfg.reactions)
+                features["visual_reactions"] = f"analysed {len(expr)} multi-face samples (smile/motion proxies)"
+            except ExpressionUnavailable as exc:
+                features["visual_reactions"] = f"unavailable ({exc})"
+        elif cfg.reactions.enabled and cfg.reactions.visual:
+            features["visual_reactions"] = "skipped (fewer than 3 samples with 2+ faces)"
+        reaction_clip = merge_windows(list(audio_w) + vis_w)
+        reaction_basis = (["audio"] if audio_w else []) + (["visual"] if vis_w else [])
         zoom_events = plan_zoom([w for i, w in enumerate(cw_words) if i not in removed], dur, cfg.zoom,
-                                db, laugh_spans, blocked=reaction_clip)
+                                db, laugh_spans, blocked=reaction_clip,
+                                moments=[(m.start, m.end, m.strength) for m in adv.moments])
         if cfg.zoom.face_safe and samples:
             safe: List[ZoomEvent] = []
             for e in zoom_events:
@@ -176,6 +209,9 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
                 if sc >= 1.02:
                     safe.append(dataclasses.replace(e, scale=round(sc, 4)))
             zoom_events = safe
+    elif decision.mode == "contain":
+        features["zoom"] = "off in contain mode (whole frame stays visible)"
+        features["reactions"] = "not needed in contain mode (everyone already visible)"
     out_reactions = [m for m in (map_interval(a, b, keep) for a, b in reaction_clip) if m]
     out_zoom: List[ZoomEvent] = []
     for e in zoom_events:
@@ -184,6 +220,7 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
             out_zoom.append(dataclasses.replace(e, start=round(m[0], 3), end=round(m[1], 3)))
     rep["zoom"] = [dataclasses.asdict(e) for e in out_zoom]
     rep["reaction_shots"] = [list(m) for m in out_reactions]
+    rep["reaction_basis"] = reaction_basis
 
     # ---------------------------------------------------------------- face clipping metric
     face_clip = None
@@ -193,19 +230,52 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
 
     # ---------------------------------------------------------------- hook + captions
     kept_words = [w for i, w in enumerate(cw_words) if i not in removed]
-    hook = generate_hook([w for i, w in enumerate(cw_words) if i not in removed], laugh_spans, cfg.hook,
-                         [s for _, _, s in laugh])
+    hook = generate_hook(kept_words, laugh_spans, cfg.hook, [s_ for _, _, s_ in laugh], adv.hook)
     cap_words = [Word(retime(w.start, keep), retime(w.end, keep), w.text) for w in kept_words]
     placement = plan_placement(layout, cfg.captions)
     geometry_issues = caption_box_inside(placement, layout, cfg.captions)
-    rep["hook"] = dataclasses.asdict(hook) if hook else None
+    hook_plan, hook_reason, hook_issues = None, None, []
+    if hook is None:
+        hook_reason = "disabled" if not cfg.hook.enabled else "no honest hook found for this clip"
+    elif out_dur < 4.0:
+        hook_reason, hook = "clip too short for a hook", None
+    else:
+        hook_plan, hook_reason = plan_hook(layout, cfg.captions, cfg.hook, hook, placement)
+        if hook_plan and cfg.hook.avoid_faces and hook_plan.y_bottom > layout.fg_y and hook_plan.y_top < layout.fg_bottom:
+            if samples and hook_face_conflict(samples, hook_plan.y_top, hook_plan.y_bottom, decision.mode,
+                                              sw, sh, layout, (sol.plan.y if sol else 0), ch):
+                hook_plan, hook_reason = None, "hook would cover a face"
+            elif not samples:
+                rep["warnings"].append("hook sits over the panel and no face data is available to check it")
+        if hook_plan:
+            hook_issues = hook_box_issues(hook_plan, layout, cfg.captions, placement)
+        else:
+            hook = None
+    rep["hook"] = ({"text": hook_plan.text, "source": hook.source, "style": cfg.hook.style,
+                    "lines": list(hook_plan.lines), "y": [hook_plan.y_top, hook_plan.y_bottom],
+                    "font_size": hook_plan.font_size, "over_panel": hook_plan.over_panel}
+                   if hook_plan and hook else {"text": None, "reason": hook_reason})
+    features["hook"] = f"rendered: {hook_plan.text!r}" if hook_plan and hook else f"none ({hook_reason})"
     rep["captions"] = {"style": cfg.captions.style, "position": placement.position,
                        "fallback_position": placement.fallback, "y": [placement.y_top, placement.y_bottom],
                        "font_size": placement.font_size}
+
+    # ---------------------------------------------------------------- b-roll (real compositing)
+    broll_out: List[Tuple[str, float, float]] = []
     if cfg.broll.enabled:
-        ins = plan_broll(cw_words, get_provider(cfg.broll), cfg.broll, reaction_clip)
-        rep["broll"] = {"planned": [dataclasses.asdict(i) for i in ins], "rendered": False,
-                        "note": "B-roll is planned and reported only; it is not composited into the video."}
+        prov = get_provider(cfg.broll)
+        ins = plan_broll(kept_words, prov, cfg.broll, dur, list(reaction_clip) + list(laugh_spans))
+        for i_ in ins:
+            m = map_interval(i_.start, i_.end, keep)
+            if m and m[1] - m[0] >= 1.0 and Path(i_.path).is_file():       # kept inside ONE segment
+                broll_out.append((i_.path, round(m[0], 3), round(m[1], 3)))
+        rep["broll"] = {"status": (f"rendered {len(broll_out)} insert(s)" if broll_out else
+                                   "enabled but no matching footage / safe slot"),
+                        "inserts": [list(b_) for b_ in broll_out]}
+        features["broll"] = rep["broll"]["status"]
+    else:
+        rep["broll"] = {"status": "disabled"}
+        features["broll"] = "disabled"
 
     # ---------------------------------------------------------------- crop plan on cut timeline
     plan = None
@@ -219,14 +289,15 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
                      crop_w=cw, crop_h=ch, crop_x_expr=plan.x_expr if plan else "0",
                      crop_y=plan.y if plan else 0, keep=keep, zoom_events=out_zoom,
                      zoom_trans=cfg.zoom.transition_duration, zoom_normal=cfg.zoom.normal_scale,
-                     reaction_windows=out_reactions, bg=cfg.background,
+                     reaction_windows=out_reactions, broll=broll_out, bg=cfg.background,
                      panel_blur=cfg.foreground.panel_blur,
                      panel_blur_strength=cfg.foreground.panel_blur_strength,
                      has_audio=info.has_audio, crossfade_ms=cfg.silence_removal.crossfade_ms,
                      loudnorm=cfg.output.loudnorm, target_lufs=cfg.output.target_lufs)
 
     attempts: List[Optional[bool]] = [False]            # plain? (False = styled)
-    if cfg.captions.enabled and cap_words:
+    need_ass = bool(cfg.captions.enabled and cap_words) or hook_plan is not None
+    if need_ass:
         attempts = [False, True]
     codec = resolve_encoder(cfg.output.encoder)
     captions_ok = True
@@ -235,12 +306,12 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
         tmpd = Path(tmp)
         done = False
         for n, plain in enumerate(attempts):
-            if cfg.captions.enabled and cap_words:
+            if need_ass:
                 ccfg = cfg.captions
                 if plain:
                     ccfg = dataclasses.replace(ccfg, font="Arial", font_file=None)
                 ass, stats_c = build_ass(cap_words, ccfg, layout, placement, hook, cfg.hook,
-                                         hook_end=out_dur * 0.5, plain=bool(plain))
+                                         hook_end=out_dur * 0.5, plain=bool(plain), hook_plan=hook_plan)
                 (tmpd / "captions.ass").write_text(ass, encoding="utf-8")
                 spec.ass_name = "captions.ass"
                 spec.fonts_dir = None
@@ -256,7 +327,8 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
             try:
                 for enc in ([codec] if codec == "libx264" else [codec, "libx264"]):
                     cmd = build_command(src, out, start, dur, graph, info.has_audio,
-                                        video_codec_args(enc, cfg.output), cfg.output.audio_bitrate, script)
+                                        video_codec_args(enc, cfg.output), cfg.output.audio_bitrate, script,
+                                        [b_[0] for b_ in broll_out])
                     try:
                         run(cmd, "render", cwd=tmp)
                         done = True
@@ -282,11 +354,21 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
         caption_times = [(cap_words[i].start + cap_words[i].end) / 2 for i in range(0, len(cap_words), step)][:5]
     qa_info = {"src_has_audio": info.has_audio, "words": cap_words, "caption_events": stats_c.events if stats_c else 0,
                "caption_times": caption_times, "placement": placement, "face_clip_ratio": face_clip,
-               "mode": decision.mode, "caption_geometry_issues": geometry_issues}
+               "mode": decision.mode, "caption_geometry_issues": geometry_issues, "hook_issues": hook_issues}
     if cfg.qa.enabled:
         report = qa_mod.check_clip(out, layout, out_dur, cfg, qa_info)
     else:
         report = qa_mod.QAReport()
+    rep["captions"]["groups"] = stats_c.groups if stats_c else 0
+    features["captions"] = f"{stats_c.groups} phrases, style {cfg.captions.style}" if stats_c else "disabled"
+    features["silence_removal"] = (f"removed {dur - out_dur:.1f}s" if keep else
+                                   ("enabled, nothing to remove" if cfg.silence_removal.enabled else "disabled"))
+    features["jump_cuts"] = (f"{len(jc.reasons)} cut(s)" if (keep and jc.reasons) else
+                             ("enabled, none needed" if cfg.jump_cuts.enabled else "disabled"))
+    features.setdefault("zoom", f"{len(out_zoom)} event(s)" if cfg.zoom.enabled else "disabled")
+    features.setdefault("reactions", (f"{len(out_reactions)} window(s) via {'+'.join(reaction_basis)}"
+                                      if out_reactions else ("none found" if cfg.reactions.enabled else "disabled")))
+    rep["features"] = features
     rep["qa"] = report.as_dict()
     rep["output_duration"] = round(out_dur, 3)
     rep["captions"]["styled"] = captions_ok
@@ -298,6 +380,7 @@ def render_clip(src, out, start: float, end: float, words: Sequence[Word], cfg: 
             ok = qa_mod.contact_sheet(out, layout, d / f"{out.stem}.contact.jpg", cfg.qa.contact_frames)
             rep["contact_sheet"] = f"{out.stem}.contact.jpg" if ok else None
         (d / f"{out.stem}.report.json").write_text(json.dumps(rep, indent=2, default=str), encoding="utf-8")
+        qa_mod.write_preview(rep, d / f"{out.stem}.preview.md")
     for wmsg in report.warnings:
         log.warning("%s QA warning: %s", out.name, wmsg)
     if not report.ok:

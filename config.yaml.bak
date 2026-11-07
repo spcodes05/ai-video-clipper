@@ -142,3 +142,40 @@ phase2:
     delivery: 0.10
     laughter: 0.05
     visual: 0.15
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: professional short-form editing (sharp square panel on a blurred 9:16
+# canvas, group-aware framing, word-safe silence removal, emphasis zooms, animated
+# captions, hooks, QA). Precedence: defaults < preset < this section < CLI flags.
+# Enable with `--phase3` / `--editing-style podcast`, or set enabled: true.
+# Keys below are commented out on purpose: uncomment one to override the preset.
+# ---------------------------------------------------------------------------
+phase3:
+  enabled: false
+  preset: general            # general | podcast | comedy | interview   (--editing-style)
+  output:
+    aspect_ratio: "9:16"
+    # resolution: "1080x1920"   # default: video.width x video.height
+    fps: 30
+    encoder: auto            # auto | cpu | nvenc | qsv | amf | videotoolbox (GPU only if a test encode works)
+  foreground:
+    aspect_ratio: "1:1"
+    width: 0                 # 0 = full canvas width (1080 -> 1080x1080 panel)
+    position: center         # center | top | bottom | upper | lower
+    offset_y: 0
+    # fit_mode: auto         # auto | crop | contain            (--fit-mode)
+  background:
+    enabled: true
+    mode: blur               # blur | solid
+    blur_strength: 24
+  # group: {group_min_faces: 3, contain_when_unsure: true}
+  # silence_removal: {enabled: true, threshold_db: -38, minimum_silence_duration: 0.6, padding: 0.12,
+  #                   keep_pause: 0.35, preserve_comedic_pauses: true, crossfade_ms: 20}
+  # jump_cuts: {enabled: false}
+  # zoom: {enabled: true, normal_scale: 1.0, emphasis_scale: 1.08, maximum_scale: 1.15, transition_duration: 0.35}
+  # reactions: {enabled: true}
+  # captions: {style: bold, position: below, font_size: 72, safe_bottom: 200}   # classic|bold|karaoke|highlighted|minimal
+  # hook: {enabled: true, text: null, duration: 2.5}
+  # broll: {enabled: false, provider: none, folder: null}
+  # qa: {enabled: true, contact_sheet: true, max_face_clip_ratio: 0.25}
