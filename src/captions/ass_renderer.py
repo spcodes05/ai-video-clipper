@@ -25,6 +25,11 @@ class CaptionStyle:
 STYLES: dict[str, CaptionStyle] = {
     "bold": CaptionStyle(name="bold"),
     "clean": CaptionStyle(name="clean", font_size=72, bold=0, outline_width=4, uppercase=False),
+    # Phase 3 style names, mapped to the closest legacy look so --caption-style works everywhere.
+    "classic": CaptionStyle(name="classic", font_size=72, bold=0, outline_width=4, uppercase=False),
+    "karaoke": CaptionStyle(name="karaoke"),
+    "highlighted": CaptionStyle(name="highlighted"),
+    "minimal": CaptionStyle(name="minimal", font_size=60, bold=0, outline_width=3, uppercase=False),
 }
 
 

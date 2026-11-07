@@ -33,6 +33,7 @@ class ClipRenderer:
         reframer: Reframer,
         captions_dir: Path,
         phase2_cfg=None,
+        phase3_cfg=None,
     ):
         self.v = video_cfg
         self.c = caption_cfg
@@ -40,6 +41,8 @@ class ClipRenderer:
         self.captions_dir = Path(captions_dir)
         self.reframer.target_w, self.reframer.target_h = video_cfg.width, video_cfg.height
         self.phase2_cfg = phase2_cfg
+        self.phase3_cfg = phase3_cfg
+        self._detector = None  # shared face detector (loaded once, reused for every clip)
 
     def render(
         self,
@@ -49,10 +52,61 @@ class ClipRenderer:
         transcript: Transcript,
         out_path: Path,
         scene_cuts: Sequence[float] = (),
+        laughter: Sequence = (),
     ) -> RenderedClip:
+        if self.phase3_cfg is not None:
+            return self._render_phase3(src_path, clip, transcript, out_path, scene_cuts, laughter)
         if self.phase2_cfg is not None:
             return self._render_phase2(src_path, clip, transcript, out_path, scene_cuts)
         return self._render_legacy(src_path, meta, clip, transcript, out_path)
+
+    # ------------------------------------------------------------------ phase 3
+    def _render_phase3(self, src_path, clip, transcript, out_path, scene_cuts, laughter) -> RenderedClip:
+        from phase2.boundaries import Word
+        from phase3.render import render_clip
+
+        start, end = float(clip.final_start), float(clip.final_end)
+        if end <= start:
+            raise FFmpegError(f"Invalid clip range: start={start}, end={end}")
+        out_path = Path(out_path)
+        words = [
+            Word(start + w.start, start + w.end, w.word)
+            for w in words_for_clip(transcript.segments, start, end)
+        ]
+        speech = [
+            (float(s.start), float(s.end))
+            for s in transcript.segments
+            if s.end > start and s.start < end
+        ]
+        if not words:
+            log.warning("No words found for %s; Phase 3 will render without captions or hook.", out_path.name)
+        if self._detector is None and self.phase3_cfg.foreground.fit_mode != "contain":
+            try:
+                from phase2.faces import DetectorUnavailable, HaarFaceDetector
+                self._detector = HaarFaceDetector(self.phase3_cfg.framing.min_confidence,
+                                                  self.phase3_cfg.framing.min_neighbors)
+            except DetectorUnavailable as exc:
+                log.warning("Face detector unavailable (%s); framing will fall back to contain", exc)
+                self._detector = False
+        try:
+            result = render_clip(
+                src_path, out_path, start, end, words, self.phase3_cfg,
+                speech_segments=speech, scene_cuts=list(scene_cuts), laughter=list(laughter),
+                detector=self._detector or None,
+                report_dir=self.captions_dir.parent / "phase3", log=log,
+            )
+        except FFmpegError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - report per clip, keep the pipeline alive
+            log.exception("Phase 3 render failed for %s", out_path.name)
+            raise FFmpegError(f"Phase 3 render failed for {out_path.name}: {exc}") from exc
+        log.info("Phase 3 rendered %s: %.2fs-%.2fs, framing=%s, captions styled=%s",
+                 out_path.name, start, end, result.mode, result.captions_ok)
+        return RenderedClip(
+            clip_number=clip.clip_number or 0, path=str(out_path), start=start, end=end,
+            duration=round(result.duration, 2), viral_score=clip.viral_score,
+            title=clip.analysis.title, reasoning=clip.analysis.reasoning,
+        )
 
     # ------------------------------------------------------------------ phase 2
     def _render_phase2(self, src_path, clip, transcript, out_path, scene_cuts) -> RenderedClip:

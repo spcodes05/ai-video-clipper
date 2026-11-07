@@ -1,0 +1,144 @@
+output_dir: output
+logs_dir: logs
+
+whisper:
+  model: small
+  model_path: null
+  device: cpu
+  compute_type: int8
+
+candidates:
+  min_duration: 15
+  max_duration: 60
+  max_candidates: 40
+  scene_threshold: 27.0
+  overlap_suppression: 0.5
+  signal_weights:
+    density: 0.15
+    emotion: 0.15
+    qa: 0.10
+    punchline: 0.15
+    hook: 0.15
+    audio: 0.15
+    scene: 0.05
+    speech: 0.10
+
+boundaries:
+  lead_in: 0.25
+  tail: 0.45
+  snap_tolerance: 3.0
+  word_snap: true
+  pause_gap: 0.35
+  laugh_tail: 1.5
+  laugh_threshold: 0.25
+
+analysis:
+  profile: comedy         # general | comedy | interview | educational | gaming | tutorial
+  laughter: true
+
+scoring:
+  context_penalty: 0.85   # multiplier when the LLM says the clip needs too much context
+  weights:
+    hook: 0.20
+    humor: 0.20
+    surprise: 0.15
+    emotion: 0.15
+    shareability: 0.10
+    visual_interest: 0.10
+    context_completeness: 0.10
+
+selection:
+  num_clips: 5
+  allow_overlap: false
+  max_overlap_ratio: 0.0
+
+video:
+  width: 1080
+  height: 1920
+  crf: 20
+  preset: veryfast
+  audio_bitrate: 160k
+  reframe_mode: center
+
+captions:
+  style: bold
+  words_per_line: 3
+  max_chars: 20
+
+phase2:
+  enabled: false   # master switch; --phase2 / --no-phase2 overrides
+  clip:
+    min_seconds: 45
+    target_seconds: 60
+    max_seconds: 90
+    start_lookback: 6.0
+    end_lookahead: 8.0
+    lead_in: 0.15
+    tail_out: 0.35
+    max_overlap: 0.4
+    sentence_gap: 0.8
+  render:
+    width: 1080
+    height: 1920
+    fps: 30
+    crf: 20
+    preset: medium
+    audio_bitrate: 192k
+    loudnorm: true
+    target_lufs: -16.0
+    limiter: true
+    max_upscale: 2.0
+  framing:
+    enabled: true
+    sample_interval: 0.5
+    analysis_width: 640
+    min_confidence: 2.0
+    min_neighbors: 5
+    deadzone: 0.06
+    smoothing: 0.15
+    max_speed: 0.25
+    keyframe_interval: 1.0
+    headroom: 0.35
+    track_ttl: 1.5
+    match_distance: 0.12
+    switch_ratio: 1.4
+    hold_seconds: 2.0
+    blur_fit: auto
+    min_face_ratio: 0.6
+  captions:
+    enabled: true
+    font: Arial
+    font_file: null
+    font_size: 78
+    primary: "FFFFFF"
+    highlight: "00E5FF"
+    outline_color: "000000"
+    outline: 5
+    shadow: 2
+    max_words: 4
+    max_chars: 22
+    max_lines: 2
+    margin_bottom: 420
+    min_margin_bottom: 220
+    margin_side: 90
+    word_highlight: true
+    min_word_seconds: 0.08
+    max_gap: 0.8
+  edit:
+    remove_silence: false
+    max_pause: 1.2
+    keep_pause: 0.4
+  analysis:
+    scene_detection: true
+    scene_threshold: 0.35
+    scene_fps: 2.0
+    laughter: false
+    delivery: false
+  weights:
+    opening: 0.20
+    completeness: 0.20
+    information: 0.20
+    audio_quality: 0.10
+    delivery: 0.10
+    laughter: 0.05
+    visual: 0.15

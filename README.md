@@ -126,3 +126,42 @@ clip length limits are `candidates.min_duration`/`max_duration` (`--min-duration
 OpenCV 5.x has no Haar cascade, so `requirements.txt` pins `opencv-python<5`.
 A Phase 2 render error fails that clip (see `output/analysis/report.json` and `logs/app.log`);
 there is no silent fallback to the legacy renderer.
+
+
+## Phase 3 — professional short-form editing
+
+Enable with any Phase 3 flag or `phase3.enabled: true`. Without them nothing changes (Phase 1/2 paths are untouched).
+
+```powershell
+python main.py --input input/video.mp4 --num-clips 5 --editing-style podcast --aspect-ratio 9:16 `
+  --foreground-ratio 1:1 --fit-mode auto --caption-style karaoke --dynamic-zoom --remove-silence --hook-text
+```
+
+| Flag | Meaning |
+|---|---|
+| `--phase3/--no-phase3` | master switch (any flag below turns it on) |
+| `--editing-style podcast\|comedy\|interview\|general` | preset (sections in `config.yaml` override it) |
+| `--aspect-ratio 9:16`, `--foreground-ratio 1:1` | canvas / sharp panel ratio (1080x1920 -> 1080x1080 panel) |
+| `--fit-mode auto\|crop\|contain` | square-panel framing |
+| `--caption-style classic\|bold\|karaoke\|highlighted\|minimal` | caption look |
+| `--dynamic-zoom/--no-dynamic-zoom`, `--remove-silence/--no-remove-silence` | toggles |
+| `--hook-text [TEXT]`, `--no-hook` | opening hook (auto from spoken words, or your text) |
+| `--b-roll` | plans B-roll inserts into the report only |
+
+Architecture (`phase3/`): `config` (typed + presets) · `layout` (canvas/panel geometry) · `framing` (AUTO/CROP/CONTAIN, group logic, reuses phase2 face sampling/tracking/smoothing) · `silence` + `jumpcuts` + `timeline` (word-safe cuts) · `zoom` · `reactions` · `captions` · `hooks` · `broll` · `filters` (one FFmpeg pass, encoder selection) · `render` · `qa`.
+
+Decisions
+- **AUTO is conservative.** It crops only when detected faces provably fit; 3+ faces, weak/no detections, or far-apart faces -> CONTAIN (whole frame, blurred fill, never stretched). Zoom is disabled in CONTAIN so nobody is cut off; in crop mode every zoom is capped so tracked faces stay inside.
+- **Silence removal is audio-confirmed and word-safe.** Only the audio-silent part of a between-word gap is cut, with padding and a kept natural pause, micro-fades at joins, comedic pauses (setup->short payoff, questions, laughs) shortened only beyond `comedic_keep`, and a final check that no word straddles a cut.
+- **Reaction shots** (cut to the whole group) happen only when a laugh is *measured* in the audio and >= 2 faces in the picture (needs `analysis.laughter: true`).
+- **Hooks** are quotes of words actually spoken, or "WAIT FOR THE REACTION" only if a laugh was detected.
+- Pixel values in caption/hook settings are authored for 1080 wide and scale with the output.
+
+Output per clip: `output/clips/clip_XX.mp4`, `output/analysis/phase3/clip_XX.report.json` (framing mode + reason, cuts, zooms, hook, caption box, QA), `clip_XX.contact.jpg` (frames with the panel outlined). A clip failing a critical QA check is reported in `analysis/report.json` and not counted as rendered.
+
+Known limitations
+- Faces use OpenCV Haar (frontal only, CPU). Side-on or small faces are missed, so AUTO then prefers CONTAIN; there is no true active-speaker or expression/emotion recognition. Reactions rely on audio laughter, not facial expressions.
+- B-roll is interface + offline folder matcher + report only; it is not composited.
+- Silence audio uses micro-fades at joins (not overlapping crossfades) so audio stays in sync with the video.
+- GPU encoding (`encoder: auto`) is used only if a test encode succeeds; filters run on CPU.
+- Phase 3 does not run Whisper again; it reuses the transcript from the pipeline.

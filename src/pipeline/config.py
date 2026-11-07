@@ -183,6 +183,7 @@ class AppConfig(_Cfg):
     video: VideoConfig = Field(default_factory=VideoConfig)
     captions: CaptionConfig = Field(default_factory=CaptionConfig)
     phase2: dict | None = None  # raw section; validated by src.pipeline.phase2_bridge
+    phase3: dict | None = None  # raw section; validated by src.pipeline.phase3_bridge
 
 
 def apply_profile(cfg: AppConfig) -> AppConfig:
@@ -232,6 +233,29 @@ def load_config(path: str = "config.yaml", overrides: dict | None = None) -> App
     elif not isinstance(data["phase2"], dict):
         raise ConfigError("'phase2' must be a mapping")
     _set(data, ("phase2", "enabled"), o.get("phase2"))
+
+    # ---- Phase 3 overrides (any phase3 flag switches Phase 3 on unless --no-phase3 was given)
+    _set(data, ("phase3", "enabled"), o.get("phase3"))
+    _set(data, ("phase3", "preset"), o.get("editing_style"))
+    _set(data, ("phase3", "output", "aspect_ratio"), o.get("aspect_ratio"))
+    _set(data, ("phase3", "foreground", "aspect_ratio"), o.get("foreground_ratio"))
+    _set(data, ("phase3", "foreground", "fit_mode"), o.get("fit_mode"))
+    _set(data, ("phase3", "zoom", "enabled"), o.get("dynamic_zoom"))
+    _set(data, ("phase3", "silence_removal", "enabled"), o.get("remove_silence"))
+    if o.get("hook_text") is not None:
+        _set(data, ("phase3", "hook", "enabled"), True)
+        if isinstance(o["hook_text"], str) and o["hook_text"] != "__auto__":
+            _set(data, ("phase3", "hook", "text"), o["hook_text"])
+    if o.get("no_hook"):
+        _set(data, ("phase3", "hook", "enabled"), False)
+    if o.get("b_roll"):
+        _set(data, ("phase3", "broll", "enabled"), True)
+    if o.get("caption_style") in ("classic", "bold", "karaoke", "highlighted", "minimal", "clean"):
+        _set(data, ("phase3", "captions", "style"), o["caption_style"])
+    if data.get("phase3") is None:
+        data.pop("phase3", None)
+    elif not isinstance(data["phase3"], dict):
+        raise ConfigError("'phase3' must be a mapping")
 
     try:
         cfg = AppConfig.model_validate(data)

@@ -14,6 +14,7 @@ from src.detection.visual_analyzer import VisualAnalyzer
 from src.models.schemas import RenderedClip, Transcript, VideoMetadata
 from src.pipeline.config import AppConfig
 from src.pipeline.phase2_bridge import build_phase2_cfg, scene_cuts_from, selection_for
+from src.pipeline.phase3_bridge import build_phase3_cfg
 from src.transcription.whisper_service import WhisperService, save_transcript
 from src.utils.errors import FFmpegError, PipelineError
 from src.utils.ffmpeg import check_ffmpeg, extract_audio, probe_video, validate_video
@@ -41,6 +42,9 @@ class Pipeline:
         self._audio = None
         self._laughter: list = []
         self.phase2_cfg = build_phase2_cfg(cfg)  # None unless phase2.enabled; raises ConfigError if broken
+        self.phase3_cfg = build_phase3_cfg(cfg)  # None unless phase3.enabled; takes precedence over phase2
+        if self.phase3_cfg is not None and self.phase2_cfg is not None:
+            log.info("phase2 and phase3 are both enabled: Phase 3 renders; phase2 only affects clip selection")
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -140,7 +144,11 @@ class Pipeline:
         return selected
 
     def _render(self, meta, transcript, selected, scenes=()):
-        self._step(7, "Rendering (Phase 2 enabled)..." if self.phase2_cfg else "Rendering...")
+        label = "Rendering (Phase 3)..." if self.phase3_cfg else (
+            "Rendering (Phase 2 enabled)..." if self.phase2_cfg else "Rendering...")
+        self._step(7, label)
+        exp_w, exp_h = (self.phase3_cfg.output.dims() if self.phase3_cfg
+                        else (self.cfg.video.width, self.cfg.video.height))
         scene_cuts = scene_cuts_from(scenes)
         for old in self.clips_dir.glob("clip_*.mp4"):
             old.unlink()
@@ -150,6 +158,7 @@ class Pipeline:
             get_reframer(self.cfg.video.reframe_mode),
             self.analysis_dir / "captions",
             phase2_cfg=self.phase2_cfg,
+            phase3_cfg=self.phase3_cfg,
         )
         rendered: list[RenderedClip] = []
         report: list[dict] = []
@@ -170,11 +179,10 @@ class Pipeline:
             item = None
             try:
                 item = renderer.render(
-                    self.input_path, meta, clip, transcript, out_path, scene_cuts=scene_cuts
+                    self.input_path, meta, clip, transcript, out_path, scene_cuts=scene_cuts,
+                    laughter=self._laughter,
                 )
-                entry["issues"] = validate_clip(
-                    out_path, item.duration, self.cfg.video.width, self.cfg.video.height
-                )
+                entry["issues"] = validate_clip(out_path, item.duration, exp_w, exp_h)
             except FFmpegError as exc:
                 entry["issues"] = [f"render failed: {exc}"]
             entry["ok"] = not entry["issues"]
@@ -190,6 +198,7 @@ class Pipeline:
                 "input": str(self.input_path),
                 "profile": self.cfg.analysis.profile,
                 "phase2_enabled": self.phase2_cfg is not None,
+                "phase3_enabled": self.phase3_cfg is not None,
                 "requested_clips": self.cfg.selection.num_clips,
                 "rendered_clips": len(rendered),
                 "clips": report,
